@@ -200,7 +200,7 @@ Intercept (95%):   100.0000+-0.0000
 Slope (95%, /day): -1.0000+-0.0000
 R-squared:         1.0000
 Pvalue:            0.0000
-Recovery By (95%): 2025-03-27 00:00:00+-0.00 (days)
+Recovery By (95%): 2025-03-27T00:00+-0.00 (days)
 ```
 
 **JSON output** (`--json`):
