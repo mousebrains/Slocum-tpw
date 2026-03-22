@@ -6,6 +6,7 @@
 import argparse
 import datetime
 import logging
+import math
 import os.path
 import re
 
@@ -69,7 +70,13 @@ def parse_log_file(fn: str, glider: str) -> pd.DataFrame:
                     dt = float(matches[3])
                 except ValueError:
                     continue
-                if dt > 1e300 or abs(lat) > 90 or abs(lon) > 180:
+                if (
+                    dt > 1e300
+                    or math.isnan(lat)
+                    or math.isnan(lon)
+                    or abs(lat) > 90
+                    or abs(lon) > 180
+                ):
                     continue
                 t = currTime - dt
                 times.append(t)
@@ -120,7 +127,7 @@ def parse_log_file(fn: str, glider: str) -> pd.DataFrame:
     # Fill arrays using dict lookup instead of argmin
     for key in sorted(info):
         for row in info[key]:
-            rounded = round(row[0], -2)
+            rounded = float(np.round(row[0], -2))
             idx = time_to_idx.get(rounded)
             if idx is None:
                 # Fallback: find nearest bin
@@ -142,11 +149,16 @@ def process_files(filenames: list[str], t0: str | None, nc: str) -> None:
     for fn in sorted(filenames):
         fields = os.path.basename(fn).split("_")
         if len(fields) < 2:
+            logging.warning("Skipping %s: filename does not match {glider}_{timestamp}_*.log", fn)
             continue
         if t0 and fields[1] < t0:
             continue
         glider = fields[0]
-        a = parse_log_file(fn, glider)
+        try:
+            a = parse_log_file(fn, glider)
+        except OSError as e:
+            logging.error("Failed to read %s: %s", fn, e)
+            continue
         if a is not None and a.t.size:
             items.append(a)
 
@@ -157,7 +169,8 @@ def process_files(filenames: list[str], t0: str | None, nc: str) -> None:
 
     ds = xr.Dataset.from_dataframe(pd.concat(items, ignore_index=True))
     logging.info("Writing %s to %s", ds.sizes, nc)
-    ds.to_netcdf(nc)
+    encoding = {var: {"zlib": True, "complevel": 4} for var in ds.data_vars}
+    ds.to_netcdf(nc, encoding=encoding)
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:

@@ -125,6 +125,12 @@ class TestMkCombo:
         assert result is True
         assert output.exists()
 
+    def test_nonexistent_glider_id(self, tmp_path, log_nc, flt_nc, sci_nc):
+        """Glider ID not in data should fail with clear error."""
+        output = tmp_path / "combined.nc"
+        result = mk_combo("osu999", str(output), str(log_nc), str(flt_nc), str(sci_nc))
+        assert result is False
+
     def test_empty_log_after_velocity_filter(self, tmp_path, flt_nc, sci_nc):
         """Log data with all-NaN velocities should fail."""
         t0 = np.datetime64("2023-06-12T15:30:00")

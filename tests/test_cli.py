@@ -1,6 +1,8 @@
 """Tests for slocum_tpw.cli."""
 
+import numpy as np
 import pytest
+import xarray as xr
 
 from slocum_tpw.cli import main
 
@@ -58,6 +60,19 @@ class TestCLI:
             )
         assert exc_info.value.code == 0
         assert output.exists()
+
+    def test_recover_by_subcommand(self, tmp_path):
+        nc = tmp_path / "test.nc"
+        times = np.datetime64("2025-01-01") + np.arange(51).astype("timedelta64[D]")
+        battery = np.linspace(100, 50, 51)
+        ds = xr.Dataset(
+            {"m_lithium_battery_relative_charge": ("time", battery)},
+            coords={"time": times},
+        )
+        ds.to_netcdf(nc)
+        with pytest.raises(SystemExit) as exc_info:
+            main(["recover-by", "--threshold", "15", str(nc)])
+        assert exc_info.value.code == 0
 
     def test_verbose_flag(self, tmp_path):
         fn = tmp_path / "argos.txt"

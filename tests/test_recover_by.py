@@ -244,3 +244,14 @@ class TestRecoverBy:
         assert "Intercept (99%):" in out
         assert "Slope (99%, /day):" in out
         assert "Recovery By (99%):" in out
+
+    def test_start_only(self, tmp_path, capsys):
+        """Using --start without --stop should restrict start but use all data to end."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc, n_days=100)
+
+        rc = _run(["--start", "2025-02-01", "--threshold", "15", str(nc)])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        assert "Recovery By" in out

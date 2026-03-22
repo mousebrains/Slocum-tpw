@@ -2,6 +2,7 @@
 
 import datetime
 
+import numpy as np
 import pytest
 import xarray as xr
 
@@ -103,3 +104,18 @@ class TestProcessFiles:
         nc = tmp_path / "output.nc"
         process_files(str(nc), [])
         assert nc.exists()
+
+    def test_missing_file_skipped(self, tmp_path):
+        """A nonexistent file should be logged and skipped, not crash."""
+        nc = tmp_path / "output.nc"
+        process_files(str(nc), [str(tmp_path / "nonexistent.txt")])
+        assert nc.exists()
+
+    def test_frequency_is_integer(self, tmp_path):
+        """Frequency field should be stored as int, not float."""
+        fn = tmp_path / "argos.txt"
+        fn.write_text(ARGOS_LINE_VALID + "\n")
+        df = proc_file(str(fn))
+        assert df is not None
+        assert df.iloc[0]["frequency"] == 401650000
+        assert isinstance(df.iloc[0]["frequency"], (int, np.integer))

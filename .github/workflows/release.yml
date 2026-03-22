@@ -8,8 +8,26 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(python -c "import re; print(re.search(r'__version__\s*=\s*\"(.+?)\"', open('src/slocum_tpw/__init__.py').read()).group(1))")
+          echo "Tag version: $TAG"
+          echo "Package version: $PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match __version__ = \"$PKG\""
+            exit 1
+          fi
+
   publish-test-pypi:
-    needs: ci
+    needs: [ci, check-version]
     runs-on: ubuntu-latest
     environment: test-pypi
     permissions:
@@ -32,7 +50,12 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Create GitHub Release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - name: Create GitHub Release with artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create ${{ github.ref_name }} --generate-notes
+        run: gh release create ${{ github.ref_name }} dist/* --generate-notes

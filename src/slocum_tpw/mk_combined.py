@@ -41,6 +41,9 @@ def mk_combo(
             return False
         if gld and "glider" in ds.data_vars:
             ds = ds.sel(index=ds.index[ds.glider == gld])
+            if len(ds.index) == 0:
+                logging.error("No data for glider %s in %s", gld, fn_log)
+                return False
         dfLog = pd.DataFrame()
         dfLog["timeu"] = ds.t.data.astype("datetime64[s]").astype(float)
         dfLog["latu"] = ds.lat.data if "lat" in ds else np.full(len(ds.index), np.nan)
@@ -108,6 +111,19 @@ def mk_combo(
         sci = sci[sci.time > 0]
         sci = sci[sci.t > 0]
         sci = sci[sci.P > 0]
+        # Sanity check converted units (catch data already in mS/cm or dbar)
+        if sci.C.median() > 100:
+            logging.warning(
+                "Median conductivity %.1f mS/cm seems high — "
+                "is sci_water_cond already in mS/cm instead of S/m?",
+                sci.C.median(),
+            )
+        if sci.P.median() > 12000:
+            logging.warning(
+                "Median pressure %.1f dbar seems high — "
+                "is sci_water_pressure already in dbar instead of bar?",
+                sci.P.median(),
+            )
         sci["lat"] = np.interp(sci.time, flt_time, flt_lat, left=np.nan, right=np.nan)
         sci["lon"] = np.interp(sci.time, flt_time, flt_lon, left=np.nan, right=np.nan)
         n_before = len(sci)
@@ -135,7 +151,7 @@ def mk_combo(
         sci["rho"] = gsw.density.rho_t_exact(sa, sci.t.to_numpy(), sci.P.to_numpy()) - 1000
         sci = sci.drop(columns=["C", "P"])
         n_total = len(sci)
-        sci = sci.dropna(axis=0, subset=sci.columns[1:], how="any")
+        sci = sci.dropna(axis=0, subset=[c for c in sci.columns if c != "time"], how="any")
         (t, ix) = np.unique(sci.time, return_index=True)
         sci = sci.iloc[ix]
         logging.info(

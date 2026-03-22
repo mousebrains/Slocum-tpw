@@ -15,7 +15,6 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
-from matplotlib import pyplot as plt
 from scipy.stats import t
 
 S_PER_DAY = 86400  # seconds per day
@@ -85,6 +84,12 @@ def run(args: argparse.Namespace) -> int:
     ci_pct = f"{args.confidence * 100:g}"
 
     if args.plot or args.output:
+        import matplotlib
+
+        if args.output and not args.plot:
+            matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+
         fig, axs = plt.subplots(len(args.filename), 1, sharex=True, squeeze=False)
         fig.subplots_adjust(hspace=0)
 
@@ -113,7 +118,9 @@ def run(args: argparse.Namespace) -> int:
                     time_vals = None
 
                 if time_vals is not None:
-                    dim_name = next(iter(ds.dims))
+                    # Find the dimension the sensor variable uses
+                    sensor_dims = ds[args.sensor].dims
+                    dim_name = sensor_dims[0] if sensor_dims else next(iter(ds.dims))
                     logging.debug(
                         "Setting time coordinate from %s on dimension %s", args.time, dim_name
                     )
@@ -264,8 +271,8 @@ def run(args: argparse.Namespace) -> int:
                     ax.legend()
                     ax.grid()
 
-        except Exception as e:
-            logging.error("Failed to read %s: %s", fn, e)
+        except (OSError, ValueError, KeyError) as e:
+            logging.error("Failed to process %s: %s", fn, e)
             continue
 
     if args.json_output:
