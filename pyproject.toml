@@ -43,7 +43,9 @@ slocum-tpw = "slocum_tpw.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/mousebrains/Slocum-tpw"
+Documentation = "https://github.com/mousebrains/Slocum-tpw#readme"
 Issues = "https://github.com/mousebrains/Slocum-tpw/issues"
+Changelog = "https://github.com/mousebrains/Slocum-tpw/releases"
 
 [tool.setuptools.packages.find]
 where = ["src"]

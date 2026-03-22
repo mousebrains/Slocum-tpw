@@ -30,12 +30,12 @@ ruff format src/ tests/
 
 ## Architecture
 
-- **src/slocum_tpw/cli.py** — Single entry point (`slocum-tpw`) with subcommands: `decode-argos`, `log-harvest`, `mk-combined`. Uses argparse with subparsers. Global `--verbose`/`--debug` flags control logging.
-- **src/slocum_tpw/decode_argos.py** — Parses ARGOS satellite position messages into NetCDF. Regex-based line parser.
-- **src/slocum_tpw/log_harvest.py** — Parses Slocum glider log files (binary read, UTF-8 decode). Extracts GPS, sensors, timestamps. Bins to 100-second resolution using hash-table lookup.
-- **src/slocum_tpw/mk_combined.py** — Merges log, flight, and science NetCDF data for a single glider. Computes oceanographic variables (depth, salinity, potential temperature, density) via GSW/TEOS-10. Outputs CF-1.13 compliant NetCDF.
+- **src/slocum_tpw/cli.py** — Single entry point (`slocum-tpw`) with subcommands: `decode-argos`, `log-harvest`, `mk-combined`, `recover-by`. Uses argparse with subparsers. Global `--verbose`/`--debug` flags control logging.
+- **src/slocum_tpw/decode_argos.py** — Parses ARGOS satellite position messages into NetCDF. Regex-based line parser. Public API: `proc_file()`, `process_files()`.
+- **src/slocum_tpw/log_harvest.py** — Parses Slocum glider log files (binary read, UTF-8 decode). Extracts GPS, sensors, timestamps. Bins to 100-second resolution using hash-table lookup. Public API: `parse_log_file()`, `process_files()`.
+- **src/slocum_tpw/mk_combined.py** — Merges log, flight, and science NetCDF data for a single glider. Computes oceanographic variables (depth, salinity, potential temperature, density) via GSW/TEOS-10. Outputs CF-1.13 compliant NetCDF. Public API: `mk_combo()`.
 - **src/slocum_tpw/recover_by.py** — Estimates glider recovery date from battery decay. Linear regression on battery charge over time, with confidence intervals via t-distribution. Supports JSON output and matplotlib plots.
-- **src/slocum_tpw/slocum_utils.py** — DDMM.MM to decimal degrees conversion (scalar and vectorized).
+- **src/slocum_tpw/slocum_utils.py** — DDMM.MM to decimal degrees conversion. Public API: `mk_degrees_scalar()`, `mk_degrees()`.
 
 Each subcommand module exposes: `add_arguments(parser)`, `run(args) -> int`, and its core processing functions.
 
@@ -46,7 +46,7 @@ numpy, pandas, xarray, gsw (TEOS-10 oceanographic calculations), netcdf4, scipy 
 ## CI/CD
 
 - **ci.yml** — Lint (ruff), test (Python 3.12 + 3.13 matrix with coverage), and build verification. Runs on push/PR to main.
-- **release.yml** — Triggered by `v*` tags. Publishes to test.pypi.org, then pypi.org, then creates a GitHub release.
+- **release.yml** — Triggered by `v*` tags. Publishes to test.pypi.org, then creates a GitHub release.
 - **dependabot.yml** — Monthly updates for GitHub Actions and pip dependencies.
 
 To release: bump `__version__` in `src/slocum_tpw/__init__.py`, commit, then `git tag v0.1.0 && git push --tags`.
@@ -55,5 +55,7 @@ To release: bump `__version__` in `src/slocum_tpw/__init__.py`, commit, then `gi
 
 - src layout (`src/slocum_tpw/`)
 - snake_case for public function names
+- Each subcommand module has `add_arguments(parser)` + `run(args) -> int` + core functions
 - Tests mirror source structure in `tests/`
-- Filenames for log-harvest must follow `{glider}_{timestamp}_*.log` pattern for t0 filtering
+- Log-harvest filenames must follow `{glider}_{timestamp}_*.log` pattern for t0 filtering
+- README.md serves as the PyPI long description — keep it comprehensive with full CLI and API docs
