@@ -18,6 +18,8 @@ dependencies = [
     "xarray",
     "gsw",
     "netcdf4",
+    "scipy",
+    "matplotlib",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

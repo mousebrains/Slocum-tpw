@@ -34,13 +34,14 @@ ruff format src/ tests/
 - **src/slocum_tpw/decode_argos.py** — Parses ARGOS satellite position messages into NetCDF. Regex-based line parser.
 - **src/slocum_tpw/log_harvest.py** — Parses Slocum glider log files (binary read, UTF-8 decode). Extracts GPS, sensors, timestamps. Bins to 100-second resolution using hash-table lookup.
 - **src/slocum_tpw/mk_combined.py** — Merges log, flight, and science NetCDF data for a single glider. Computes oceanographic variables (depth, salinity, potential temperature, density) via GSW/TEOS-10. Outputs CF-1.13 compliant NetCDF.
+- **src/slocum_tpw/recover_by.py** — Estimates glider recovery date from battery decay. Linear regression on battery charge over time, with confidence intervals via t-distribution. Supports JSON output and matplotlib plots.
 - **src/slocum_tpw/slocum_utils.py** — DDMM.MM to decimal degrees conversion (scalar and vectorized).
 
 Each subcommand module exposes: `add_arguments(parser)`, `run(args) -> int`, and its core processing functions.
 
 ## Key Dependencies
 
-numpy, pandas, xarray, gsw (TEOS-10 oceanographic calculations), netcdf4. GPS interpolation uses numpy.interp (no scipy dependency).
+numpy, pandas, xarray, gsw (TEOS-10 oceanographic calculations), netcdf4, scipy (t-distribution for recover-by), matplotlib (plotting for recover-by).
 
 ## CI/CD
 

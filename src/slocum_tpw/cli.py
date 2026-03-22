@@ -70,6 +70,16 @@ def main(argv: list[str] | None = None) -> None:
     add_mc_args(mc_parser)
     mc_parser.set_defaults(func=run_mc)
 
+    # -- recover-by --
+    from slocum_tpw.recover_by import add_arguments as add_rb_args
+    from slocum_tpw.recover_by import run as run_rb
+
+    rb_parser = subparsers.add_parser(
+        "recover-by", help="Estimate glider recovery date from battery decay"
+    )
+    add_rb_args(rb_parser)
+    rb_parser.set_defaults(func=run_rb)
+
     args = parser.parse_args(argv)
 
     if args.command is None:

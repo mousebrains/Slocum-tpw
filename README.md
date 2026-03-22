@@ -20,6 +20,7 @@ pip install slocum-tpw
 slocum-tpw decode-argos --nc output.nc argos_messages.txt
 slocum-tpw log-harvest --nc log.nc osu684_*.log
 slocum-tpw mk-combined --glider 684 --output osu684.nc --nc-log log.nc
+slocum-tpw recover-by --threshold 15 flight.nc
 ```
 
 ### Subcommands
@@ -29,6 +30,7 @@ slocum-tpw mk-combined --glider 684 --output osu684.nc --nc-log log.nc
 | `decode-argos` | Decode ARGOS satellite position messages into NetCDF |
 | `log-harvest` | Parse Slocum glider log files and extract GPS, sensors, timestamps into NetCDF |
 | `mk-combined` | Merge log, flight, and science data into CF-1.13 compliant NetCDF with derived oceanographic variables |
+| `recover-by` | Estimate glider recovery date from battery percentage decay via linear regression |
 
 ### Global Options
 
