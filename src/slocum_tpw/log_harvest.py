@@ -239,7 +239,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--t0", type=str, default=None, help="Earliest timestamp prefix to include")
     parser.add_argument("--nc", type=str, default="log.nc", help="Output NetCDF filename")
     parser.add_argument(
-        "--reprocess", action="store_true",
+        "--reprocess",
+        action="store_true",
         help="Reprocess all files, ignoring existing output",
     )
     parser.add_argument("filename", type=str, nargs="+", help="Log files to parse")
