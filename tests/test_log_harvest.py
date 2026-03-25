@@ -1,5 +1,7 @@
 """Tests for slocum_tpw.log_harvest."""
 
+import json
+
 import numpy as np
 import xarray as xr
 
@@ -188,3 +190,86 @@ class TestProcessFiles:
         nc = tmp_path / "log.nc"
         process_files([], None, str(nc))
         assert nc.exists()
+
+    def test_processed_files_attribute(self, tmp_path):
+        """Output NC stores the list of processed basenames."""
+        fn = tmp_path / "osu684_20230612T153000_test.log"
+        fn.write_bytes(SAMPLE_LOG)
+        nc = tmp_path / "log.nc"
+        process_files([str(fn)], None, str(nc))
+        with xr.open_dataset(str(nc)) as ds:
+            attr = ds.attrs.get("processed_files", "")
+            assert attr
+            names = json.loads(attr)
+            assert "osu684_20230612T153000_test.log" in names
+
+    def test_incremental_append(self, tmp_path):
+        """Second run with additional files appends to existing output."""
+        fn1 = tmp_path / "osu684_20230612T153000_a.log"
+        fn1.write_bytes(SAMPLE_LOG)
+        nc = tmp_path / "log.nc"
+        process_files([str(fn1)], None, str(nc))
+        with xr.open_dataset(str(nc)) as ds1:
+            n1 = ds1.sizes["index"]
+
+        # Second batch: same file + a new one
+        fn2 = tmp_path / "osu684_20230613T100000_b.log"
+        fn2.write_bytes(
+            b"Vehicle Name: osu684\n"
+            b"Curr Time: Tue Jun 13 10:00:00 2023 MT: 99999\n"
+            b"GPS Location: 4432.0000 N -12408.0000 E measured 5.0 secs ago\n"
+            b"sensor:m_battery(volts)=15.0 5.0 secs ago\n"
+        )
+        process_files([str(fn1), str(fn2)], None, str(nc))
+        with xr.open_dataset(str(nc)) as ds2:
+            n2 = ds2.sizes["index"]
+            assert n2 > n1
+            names = json.loads(ds2.attrs["processed_files"])
+            assert "osu684_20230612T153000_a.log" in names
+            assert "osu684_20230613T100000_b.log" in names
+
+    def test_incremental_no_new_files(self, tmp_path):
+        """Second run with same files is a no-op."""
+        fn = tmp_path / "osu684_20230612T153000_test.log"
+        fn.write_bytes(SAMPLE_LOG)
+        nc = tmp_path / "log.nc"
+        process_files([str(fn)], None, str(nc))
+        mtime1 = nc.stat().st_mtime_ns
+
+        # Run again — should detect no new files and leave output unchanged
+        process_files([str(fn)], None, str(nc))
+        mtime2 = nc.stat().st_mtime_ns
+        assert mtime1 == mtime2
+
+    def test_reprocess_flag(self, tmp_path):
+        """--reprocess ignores existing output and redoes everything."""
+        fn = tmp_path / "osu684_20230612T153000_test.log"
+        fn.write_bytes(SAMPLE_LOG)
+        nc = tmp_path / "log.nc"
+        process_files([str(fn)], None, str(nc))
+        mtime1 = nc.stat().st_mtime_ns
+
+        process_files([str(fn)], None, str(nc), reprocess=True)
+        mtime2 = nc.stat().st_mtime_ns
+        assert mtime2 != mtime1
+        with xr.open_dataset(str(nc)) as ds:
+            assert "t" in ds
+
+    def test_incremental_new_sensor_column(self, tmp_path):
+        """A new sensor in the second batch creates a new column, NaN-filled for old rows."""
+        fn1 = tmp_path / "osu684_20230612T153000_a.log"
+        fn1.write_bytes(SAMPLE_LOG)  # has sci_water_temp, m_water_vx, m_water_vy
+        nc = tmp_path / "log.nc"
+        process_files([str(fn1)], None, str(nc))
+        with xr.open_dataset(str(nc)) as ds1:
+            assert "m_battery" not in ds1
+
+        fn2 = tmp_path / "osu684_20230613T100000_b.log"
+        fn2.write_bytes(
+            b"Vehicle Name: osu684\n"
+            b"Curr Time: Tue Jun 13 10:00:00 2023 MT: 99999\n"
+            b"sensor:m_battery(volts)=15.0 5.0 secs ago\n"
+        )
+        process_files([str(fn1), str(fn2)], None, str(nc))
+        with xr.open_dataset(str(nc)) as ds2:
+            assert "m_battery" in ds2

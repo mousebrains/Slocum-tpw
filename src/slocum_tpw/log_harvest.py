@@ -5,6 +5,7 @@
 
 import argparse
 import datetime
+import json
 import logging
 import math
 import os.path
@@ -42,68 +43,76 @@ def parse_log_file(fn: str, glider: str) -> pd.DataFrame:
                 line = str(line, "utf-8")
             except UnicodeDecodeError:
                 continue
-
-            matches = _RE_VEHICLE.match(line)
-            if matches:
-                glider = matches[1]
-
-            matches = _RE_CURRTIME.match(line)
-            if matches:
-                try:
-                    currTime = (
-                        datetime.datetime.strptime(matches[1], "%b %d %H:%M:%S %Y")
-                        .replace(tzinfo=datetime.timezone.utc)
-                        .timestamp()
-                    )
-                except ValueError:
-                    logging.warning("Invalid timestamp in %s: %s", fn, matches[1])
-                    continue
+            if not line:
                 continue
 
-            matches = _RE_GPS.match(line)
-            if matches:
-                if currTime is None:
-                    continue
-                try:
-                    lat = mk_degrees_scalar(float(matches[1]))
-                    lon = mk_degrees_scalar(float(matches[2]))
-                    dt = float(matches[3])
-                except ValueError:
-                    continue
-                if (
-                    dt > 1e300
-                    or math.isnan(lat)
-                    or math.isnan(lon)
-                    or abs(lat) > 90
-                    or abs(lon) > 180
-                ):
-                    continue
-                t = currTime - dt
-                times.append(t)
-                if "GPS" not in info:
-                    info["GPS"] = []
-                info["GPS"].append((t, lat, lon))
+            c = line[0]
+
+            if c == "V":
+                matches = _RE_VEHICLE.match(line)
+                if matches:
+                    glider = matches[1]
                 continue
 
-            matches = _RE_SENSOR.match(line)
-            if matches:
-                if currTime is None:
-                    continue
-                name = matches[1]
-                try:
-                    val = float(matches[3])
-                    dt = float(matches[4])
-                except ValueError:
-                    continue
-                if name.endswith("_lat") or name.endswith("_lon"):
-                    val = mk_degrees_scalar(val)
-                if dt > 1e300:
-                    continue
-                if name not in info:
-                    info[name] = []
-                t = currTime - dt
-                times.append(t)
-                info[name].append((t, val))
+            if c == "C":
+                matches = _RE_CURRTIME.match(line)
+                if matches:
+                    try:
+                        currTime = (
+                            datetime.datetime.strptime(matches[1], "%b %d %H:%M:%S %Y")
+                            .replace(tzinfo=datetime.timezone.utc)
+                            .timestamp()
+                        )
+                    except ValueError:
+                        logging.warning("Invalid timestamp in %s: %s", fn, matches[1])
+                continue
+
+            if c == "G":
+                matches = _RE_GPS.match(line)
+                if matches:
+                    if currTime is None:
+                        continue
+                    try:
+                        lat = mk_degrees_scalar(float(matches[1]))
+                        lon = mk_degrees_scalar(float(matches[2]))
+                        dt = float(matches[3])
+                    except ValueError:
+                        continue
+                    if (
+                        dt > 1e300
+                        or math.isnan(lat)
+                        or math.isnan(lon)
+                        or abs(lat) > 90
+                        or abs(lon) > 180
+                    ):
+                        continue
+                    t = currTime - dt
+                    times.append(t)
+                    if "GPS" not in info:
+                        info["GPS"] = []
+                    info["GPS"].append((t, lat, lon))
+                continue
+
+            if c == "s":
+                matches = _RE_SENSOR.match(line)
+                if matches:
+                    if currTime is None:
+                        continue
+                    name = matches[1]
+                    try:
+                        val = float(matches[3])
+                        dt = float(matches[4])
+                    except ValueError:
+                        continue
+                    if name.endswith("_lat") or name.endswith("_lon"):
+                        val = mk_degrees_scalar(val)
+                    if dt > 1e300:
+                        continue
+                    if name not in info:
+                        info[name] = []
+                    t = currTime - dt
+                    times.append(t)
+                    info[name].append((t, val))
 
     if not times:
         return pd.DataFrame()
@@ -127,7 +136,7 @@ def parse_log_file(fn: str, glider: str) -> pd.DataFrame:
     # Fill arrays using dict lookup instead of argmin
     for key in sorted(info):
         for row in info[key]:
-            rounded = float(np.round(row[0], -2))
+            rounded = round(row[0], -2)
             idx = time_to_idx.get(rounded)
             if idx is None:
                 # Fallback: find nearest bin
@@ -143,9 +152,17 @@ def parse_log_file(fn: str, glider: str) -> pd.DataFrame:
     return df
 
 
-def process_files(filenames: list[str], t0: str | None, nc: str) -> None:
-    """Process multiple log files, filter by t0, and write to NetCDF."""
-    items = []
+def process_files(
+    filenames: list[str], t0: str | None, nc: str, *, reprocess: bool = False
+) -> None:
+    """Process multiple log files, filter by t0, and write to NetCDF.
+
+    When the output file already exists and contains a ``processed_files``
+    attribute, only new files are parsed and appended.  Pass
+    ``reprocess=True`` to ignore the existing output and reprocess all files.
+    """
+    # Build candidate list (valid filenames passing the t0 filter)
+    candidates = []
     for fn in sorted(filenames):
         fields = os.path.basename(fn).split("_")
         if len(fields) < 2:
@@ -153,7 +170,36 @@ def process_files(filenames: list[str], t0: str | None, nc: str) -> None:
             continue
         if t0 and fields[1] < t0:
             continue
-        glider = fields[0]
+        candidates.append(fn)
+
+    if not candidates:
+        logging.warning("No valid log files found, writing empty %s", nc)
+        xr.Dataset().to_netcdf(nc)
+        return
+
+    # Check for existing output and determine which files are new
+    processed: set[str] = set()
+    existing_df: pd.DataFrame | None = None
+    if not reprocess and os.path.exists(nc):
+        try:
+            with xr.open_dataset(nc) as ds:
+                attr = ds.attrs.get("processed_files", "")
+                if attr:
+                    processed = set(json.loads(attr))
+                if ds.sizes.get("index", 0) > 0:
+                    existing_df = ds.to_dataframe().reset_index(drop=True)
+        except Exception:
+            logging.warning("Could not read existing %s, reprocessing all", nc)
+
+    new_files = [fn for fn in candidates if os.path.basename(fn) not in processed]
+    if not new_files:
+        logging.info("No new log files to process")
+        return
+
+    # Parse only new files
+    items = []
+    for fn in new_files:
+        glider = os.path.basename(fn).split("_")[0]
         try:
             a = parse_log_file(fn, glider)
         except OSError as e:
@@ -162,13 +208,28 @@ def process_files(filenames: list[str], t0: str | None, nc: str) -> None:
         if a is not None and a.t.size:
             items.append(a)
 
-    if not items:
+    if not items and existing_df is None:
         logging.warning("No valid log files found, writing empty %s", nc)
         xr.Dataset().to_netcdf(nc)
         return
 
-    ds = xr.Dataset.from_dataframe(pd.concat(items, ignore_index=True))
-    logging.info("Writing %s to %s", ds.sizes, nc)
+    # Combine with existing data
+    parts: list[pd.DataFrame] = []
+    if existing_df is not None:
+        parts.append(existing_df)
+    parts.extend(items)
+
+    if not parts:
+        return
+
+    combined = pd.concat(parts, ignore_index=True)
+    ds = xr.Dataset.from_dataframe(combined)
+
+    # Track all processed files
+    all_processed = processed | {os.path.basename(fn) for fn in new_files}
+    ds.attrs["processed_files"] = json.dumps(sorted(all_processed))
+
+    logging.info("Writing %s to %s (%d new files)", ds.sizes, nc, len(new_files))
     encoding = {var: {"zlib": True, "complevel": 4} for var in ds.data_vars}
     ds.to_netcdf(nc, encoding=encoding)
 
@@ -177,10 +238,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Add log-harvest arguments to the parser."""
     parser.add_argument("--t0", type=str, default=None, help="Earliest timestamp prefix to include")
     parser.add_argument("--nc", type=str, default="log.nc", help="Output NetCDF filename")
+    parser.add_argument(
+        "--reprocess", action="store_true",
+        help="Reprocess all files, ignoring existing output",
+    )
     parser.add_argument("filename", type=str, nargs="+", help="Log files to parse")
 
 
 def run(args: argparse.Namespace) -> int:
     """Execute the log-harvest command."""
-    process_files(args.filename, args.t0, args.nc)
+    process_files(args.filename, args.t0, args.nc, reprocess=args.reprocess)
     return 0
