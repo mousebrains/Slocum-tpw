@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-03-26
+
+### Added
+- Public API for `recover-by`: `prepare_dataset()`, `fit_recovery()`, `FIT_COLORS`
+- `--ndays` accepts multiple values (repeatable and/or comma-separated, e.g. `--ndays 3,7,full`)
+- `--ndays full` keyword to include the entire dataset alongside windowed fits
+- `--tau` for exponential downweighting of historical data (weight = exp(-age/tau)), also repeatable/comma-separated
+- Auto-detection of time variables (searches `time`, `t`, datetime64 dtypes, CF time units, `units='timestamp'`, names ending in `_time`); `--time` now optional
+- Kish's effective degrees of freedom for tau-weighted fits, with covariance matrix rescaling for honest confidence intervals
+- DOF shown in text output, JSON, and plot legends
+- Per-subplot titles showing filename and data point count
+- Input validation for `--ndays`/`--tau` (positive, numeric)
+
+### Changed
+- `--time` default changed from `"time"` to auto-detect
+- `prepare_dataset()` `time_var` parameter default changed from `"time"` to `None`
+- Compact text output (4 lines per result instead of 7)
+- Compact plot legend (single line per fit, recovery date first)
+- Plot uses `fig.suptitle` for sensor/threshold, `ax.set_title` for per-file info
+
+### Fixed
+- Plot raw-data gate used `win_idx == 0`; if the first window failed, raw data was never plotted
+- Non-numeric `--ndays`/`--tau` values caused uncaught traceback instead of clean error
+
+## [0.1.3] - 2026-03-25
+
+### Changed
+- Speed up `log-harvest` with incremental processing and parse optimizations
+
+## [0.1.2] - 2026-03-22
+
+### Changed
+- Add pypi.org publishing to release workflow
+
+## [0.1.1] - 2026-03-22
+
+### Changed
+- Bump GitHub Actions to Node.js 24 compatible versions
+
 ## [0.1.0] - 2026-03-22
 
 ### Added
@@ -16,8 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `recover-by` subcommand: estimate glider recovery date from battery decay via linear regression with confidence intervals
 - Unified CLI entry point (`slocum-tpw`) with `--verbose`/`--debug` logging
 - Full test suite (84+ tests, 96% coverage)
-- CI/CD with GitHub Actions (lint, test matrix, build verification, test.pypi.org publishing)
+- CI/CD with GitHub Actions (lint, test matrix, build verification, PyPI publishing)
 - Pre-commit hooks (ruff lint/format, YAML/TOML validation)
 
-[Unreleased]: https://github.com/mousebrains/Slocum-tpw/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mousebrains/Slocum-tpw/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/mousebrains/Slocum-tpw/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/mousebrains/Slocum-tpw/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/mousebrains/Slocum-tpw/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/mousebrains/Slocum-tpw/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mousebrains/Slocum-tpw/releases/tag/v0.1.0
