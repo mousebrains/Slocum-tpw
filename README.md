@@ -176,6 +176,7 @@ slocum-tpw recover-by [options] FILE [FILE ...]
 | `--tau T` | Exponential decay time constant in days — full dataset weighted by exp(-age/T); repeatable and/or comma-separated. Cannot combine with `--start`/`--stop` |
 | `--start TIME` | Use data after this UTC time (cannot combine with `--ndays`/`--tau`) |
 | `--stop TIME` | Use data before this UTC time (cannot combine with `--ndays`/`--tau`) |
+| `--thin HOURS` | Thinning interval in hours; resample bursty data to bin means, using within-bin stderr as fit weights (default: `1`, `0` to disable) |
 | `--json` | Output results as JSON instead of text |
 | `--plot` | Display an interactive matplotlib plot |
 | `--output FILE` | Save plot to file instead of displaying |
@@ -191,6 +192,12 @@ of freedom are n-2; for `--tau` weighted fits the effective degrees of freedom
 are computed via Kish's formula (effective n minus 2) and the covariance matrix
 is rescaled accordingly, producing wider (more honest) intervals when old data
 is heavily downweighted.
+
+Bursty data (multiple samples per surfacing) is thinned to hourly bin means
+by default (`--thin 1`).  Within-bin standard errors are used as
+inverse-variance weights so more reliable bins get more influence without
+inflating degrees of freedom (Kish's correction applies only to the `--tau`
+importance weights, not precision weights from thinning).
 
 The tool handles multiple time formats (CF datetime coordinates, float epoch
 seconds), removes duplicates and NaN values, and validates that at least 3
@@ -383,7 +390,7 @@ plt.plot(result["time"], result["sensor_values"], ".")
 plt.plot(result["time"], result["intercept"] + result["slope"] * result["dDays"])
 ```
 
-#### `prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_charge") -> xr.Dataset`
+#### `prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_charge", thin=1) -> xr.Dataset`
 
 Load and clean a dataset for recovery fitting. *source* can be a filename,
 `pathlib.Path`, or an existing `xr.Dataset`. Handles float epoch seconds
@@ -394,6 +401,12 @@ When *time_var* is ``None`` (the default), the time variable is auto-detected
 by searching for: well-known names (``time``, ``t``), ``datetime64`` dtypes,
 CF time units (``"... since ..."``), ``units='timestamp'`` (Slocum POSIX
 convention), and variable names ending in ``_time``.
+
+When *thin* is positive (default 1 hour), bursty data is resampled to bin
+means.  Bins with multiple samples produce a ``_bin_stderr`` variable that
+``fit_recovery`` uses as inverse-variance weights, giving more reliable bins
+more influence without inflating degrees of freedom.  Pass ``thin=0`` to
+disable.
 
 Raises `KeyError` if required variables are missing or time cannot be
 auto-detected, `OSError` if a file path cannot be opened.

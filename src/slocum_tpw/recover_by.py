@@ -11,6 +11,7 @@
 import argparse
 import json
 import logging
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -85,7 +86,7 @@ def _find_time_var(ds, sensor):
     )
 
 
-def prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_charge"):
+def prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_charge", thin=1):
     """Load and clean a dataset for recovery fitting.
 
     Parameters
@@ -100,12 +101,20 @@ def prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_ch
         ``_time``).
     sensor : str
         Name of the battery sensor variable.
+    thin : float
+        Thinning interval in hours.  Bursty data is resampled to this
+        resolution using bin means.  When bins contain multiple samples,
+        the within-bin standard error is stored as ``_bin_stderr`` and
+        used by :func:`fit_recovery` as inverse-variance weights.
+        Set to 0 or ``None`` to disable thinning.  Default: 1 (hour).
 
     Returns
     -------
     xr.Dataset
         Cleaned dataset with 'time' dimension coordinate and sensor variable,
         sorted by time with duplicates and NaN sensor values removed.
+        May contain ``_bin_stderr`` if thinning was applied and multi-sample
+        bins existed.
 
     Raises
     ------
@@ -156,6 +165,30 @@ def prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_ch
     ds = ds.drop_duplicates("time", keep="first")
     ds = ds.sel(time=ds.time[np.logical_not(ds[sensor].isnull())])
     ds = ds.sortby("time")
+
+    # Thin bursty data by resampling to fixed intervals
+    if thin and thin > 0 and ds.time.size > 0:
+        interval = f"{int(thin)}h" if thin == int(thin) else f"{int(thin * 60)}min"
+        resampler = ds.resample(time=interval)
+        ds_mean = resampler.mean()
+        ds_count = resampler.count()[sensor]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            ds_std = resampler.std(ddof=1)[sensor]  # NaN for single-sample bins
+
+        # Standard error per bin: std / sqrt(n)
+        stderr = ds_std / np.sqrt(ds_count)
+
+        # Replace invalid stderr (single-sample or zero-variance bins)
+        # with the median stderr from multi-sample bins
+        valid = np.isfinite(stderr) & (stderr > 0)
+        if valid.any():
+            median_se = float(stderr.where(valid).median())
+            if median_se > 0:
+                stderr = stderr.where(valid, median_se)
+                ds_mean["_bin_stderr"] = stderr
+
+        ds = ds_mean.dropna("time", subset=[sensor])
 
     return ds.load()
 
@@ -215,7 +248,8 @@ def fit_recovery(
         - **r_squared**, **pvalue** (*float | None*) — goodness-of-fit stats
         - **n_points** (*int*) — number of data points used
         - **dof** (*float*) — degrees of freedom used for CIs and p-value
-          (Kish's effective n minus 2 when *tau* is set, otherwise n minus 2)
+          (Kish's effective n minus 2 when weights are applied via *tau*
+          and/or ``_bin_stderr`` from thinning, otherwise n minus 2)
         - **threshold**, **confidence** (*float*) — input parameters
         - **ndays**, **tau** (*float | None*) — window parameters
     """
@@ -234,11 +268,24 @@ def fit_recovery(
 
     dDays = (ds.time.data - ds.time.data[0]) / ONE_DAY
 
-    # Exponential downweighting: polyfit squares its w argument,
-    # so pass sqrt of the desired effective weight.
+    # Build fit weights from bin stderr (inverse-variance) and/or tau
+    # (exponential downweighting).  polyfit squares its w argument,
+    # so we pass sqrt of the desired effective weight for each source.
+    bin_w = None
+    if "_bin_stderr" in ds:
+        bin_w = 1.0 / ds["_bin_stderr"].values
+
+    tau_w = None
     if tau is not None:
         age = dDays[-1] - dDays  # days from newest (0 for latest)
-        fit_weights = np.exp(-age / (2 * tau))
+        tau_w = np.exp(-age / (2 * tau))
+
+    if bin_w is not None and tau_w is not None:
+        fit_weights = tau_w * bin_w
+    elif tau_w is not None:
+        fit_weights = tau_w
+    elif bin_w is not None:
+        fit_weights = bin_w
     else:
         fit_weights = None
 
@@ -265,20 +312,21 @@ def fit_recovery(
     if not np.all(np.isfinite(cov)):
         logging.warning("Unstable fit — confidence intervals may be unreliable")
 
-    # Degrees of freedom.  polyfit uses dof = n - 2, which is correct for
-    # uniform weights.  With exponential weighting the effective sample
-    # size is smaller (Kish's formula), so we rescale the covariance
-    # matrix and use the effective dof for the t-distribution.
+    # Degrees of freedom.  polyfit uses dof = n - 2.  Bin-stderr weights
+    # are precision weights (they don't reduce effective sample size), but
+    # tau weights are importance weights that do.  Apply Kish's formula to
+    # the tau component only, then rescale the covariance matrix.
     n = dDays.size
-    if tau is not None:
-        eff_w = np.exp(-age / tau)  # effective weights
-        n_eff = float(np.sum(eff_w) ** 2 / np.sum(eff_w**2))
+    if tau_w is not None:
+        tau_eff = tau_w**2  # effective tau weights (exp(-age/tau))
+        n_eff = float(np.sum(tau_eff) ** 2 / np.sum(tau_eff**2))
         df = max(n_eff - 2, 1)
-        # Rescale covariance: polyfit divided by (n-2), we want (n_eff-2)
         cov = cov * (n - 2) / df
     else:
-        eff_w = None
         df = float(n - 2)
+
+    # Effective weights for weighted R-squared (uses all weight sources)
+    eff_w = fit_weights**2 if fit_weights is not None else None
 
     alpha = 1 - confidence
 
@@ -290,7 +338,7 @@ def fit_recovery(
     sigma_intercept = _safe_sqrt(cov[1, 1])
     sigma_slope = _safe_sqrt(cov[0, 0])
 
-    # R-squared (weighted if tau is set)
+    # R-squared (weighted when fit_weights were used)
     y_pred = intercept + slope * dDays
     if eff_w is not None:
         w_mean = float(np.average(ds[sensor], weights=eff_w))
@@ -409,6 +457,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Name of time variable (auto-detected if omitted)",
     )
     parser.add_argument(
+        "--thin",
+        type=float,
+        default=1,
+        help="Thinning interval in hours; resample bursty data to bin means, "
+        "using within-bin stderr as fit weights (default: 1, 0 to disable)",
+    )
+    parser.add_argument(
         "--confidence",
         type=float,
         default=0.95,
@@ -477,7 +532,7 @@ def run(args: argparse.Namespace) -> int:
 
     for index, fn in enumerate(args.filename):
         try:
-            ds = prepare_dataset(fn, time_var=args.time, sensor=args.sensor)
+            ds = prepare_dataset(fn, time_var=args.time, sensor=args.sensor, thin=args.thin)
         except KeyError as e:
             logging.error("%s: %s", fn, e)
             continue
