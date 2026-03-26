@@ -608,15 +608,15 @@ def run(args: argparse.Namespace) -> int:
                     r_sq = r["r_squared"]
                     r_sq_str = f" R\u00b2={r_sq:.3f}" if r_sq is not None else ""
                     fit_label = (
-                        f"{win_label}:{r_sq_str} "
-                        f"recover {r['recovery_date']}{ci_str} "
+                        f"{win_label} {r['recovery_date']}{ci_str}"
+                        f"{r_sq_str} "
                         f"(n={r['n_points']}, dof={dof_str})"
                     )
                 else:
                     color = "r"
                     fit_label = (
-                        f"{intercept:.1f}{sign}{abs_slope:.2f}/day, "
-                        f"recover {r['recovery_date']}{ci_str} "
+                        f"{r['recovery_date']}{ci_str}, "
+                        f"{intercept:.1f}{sign}{abs_slope:.2f}/day "
                         f"(dof={dof_str})"
                     )
 
