@@ -214,6 +214,8 @@ def fit_recovery(
         - **recovery_ci_days** (*float | None*) — CI half-width in days
         - **r_squared**, **pvalue** (*float | None*) — goodness-of-fit stats
         - **n_points** (*int*) — number of data points used
+        - **dof** (*float*) — degrees of freedom used for CIs and p-value
+          (Kish's effective n minus 2 when *tau* is set, otherwise n minus 2)
         - **threshold**, **confidence** (*float*) — input parameters
         - **ndays**, **tau** (*float | None*) — window parameters
     """
@@ -263,6 +265,21 @@ def fit_recovery(
     if not np.all(np.isfinite(cov)):
         logging.warning("Unstable fit — confidence intervals may be unreliable")
 
+    # Degrees of freedom.  polyfit uses dof = n - 2, which is correct for
+    # uniform weights.  With exponential weighting the effective sample
+    # size is smaller (Kish's formula), so we rescale the covariance
+    # matrix and use the effective dof for the t-distribution.
+    n = dDays.size
+    if tau is not None:
+        eff_w = np.exp(-age / tau)  # effective weights
+        n_eff = float(np.sum(eff_w) ** 2 / np.sum(eff_w**2))
+        df = max(n_eff - 2, 1)
+        # Rescale covariance: polyfit divided by (n-2), we want (n_eff-2)
+        cov = cov * (n - 2) / df
+    else:
+        eff_w = None
+        df = float(n - 2)
+
     alpha = 1 - confidence
 
     # Propagate uncertainty including covariance between slope and intercept
@@ -275,8 +292,7 @@ def fit_recovery(
 
     # R-squared (weighted if tau is set)
     y_pred = intercept + slope * dDays
-    if tau is not None:
-        eff_w = np.exp(-age / tau)  # effective weights
+    if eff_w is not None:
         w_mean = float(np.average(ds[sensor], weights=eff_w))
         ss_res = np.sum(eff_w * (ds[sensor] - y_pred) ** 2).item()
         ss_tot = np.sum(eff_w * (ds[sensor] - w_mean) ** 2).item()
@@ -289,8 +305,6 @@ def fit_recovery(
         r_squared = 1 - ss_res / ss_tot
 
     # p-value for slope
-    n = dDays.size
-    df = n - 2
     if sigma_slope > 0:
         t_stat = slope / sigma_slope
         pvalue = 2 * (1 - t.cdf(abs(t_stat), df))
@@ -316,6 +330,7 @@ def fit_recovery(
         "r_squared": float(r_squared) if np.isfinite(r_squared) else None,
         "pvalue": float(pvalue) if np.isfinite(pvalue) else None,
         "n_points": int(n),
+        "dof": df,
         "threshold": threshold,
         "confidence": confidence,
         "ndays": ndays,
@@ -521,6 +536,7 @@ def run(args: argparse.Namespace) -> int:
                 pv = r["pvalue"] if r["pvalue"] is not None else float("nan")
                 print(f"R-squared:         {r_sq:.4f}")
                 print(f"Pvalue:            {pv:.4f}")
+                print(f"DOF:               {r['dof']:.1f}")
                 recover_str = str(r["recovery_date"]) + ":00"
                 print(f"Recovery By ({ci_pct}%): {recover_str}+-{ci_r:.2f} (days)")
 
@@ -533,6 +549,7 @@ def run(args: argparse.Namespace) -> int:
                     "ndays": ndays,
                     "tau": tau,
                     "n_points": r["n_points"],
+                    "dof": r["dof"],
                     "intercept": r["intercept"],
                     "intercept_ci": r["intercept_ci"],
                     "slope": r["slope"],
@@ -588,16 +605,20 @@ def run(args: argparse.Namespace) -> int:
                     r_sq_str = f", R\u00b2={r_sq:.3f}" if r_sq is not None else ""
                     ci_r = r["recovery_ci_days"]
                     ci_str = f"\u00b1{ci_r:.1f}d" if ci_r is not None else ""
+                    dof = r["dof"]
+                    dof_str = f"{dof:.1f}" if dof != int(dof) else f"{int(dof)}"
                     fit_label = (
                         f"{ndays_label}: {intercept:.1f}{sign}{abs_slope:.2f}/day"
                         f"{r_sq_str}\n"
                         f"  recover {r['recovery_date']}{ci_str}"
-                        f" (n={r['n_points']})"
+                        f" (n={r['n_points']}, dof={dof_str})"
                     )
                 else:
                     color = "r"
+                    dof = r["dof"]
+                    dof_str = f"{dof:.1f}" if dof != int(dof) else f"{int(dof)}"
                     fit_label = f"{intercept:.1f}{sign}{abs_slope:.2f} * days"
-                    fit_label += f"\nRecovery by {r['recovery_date']}"
+                    fit_label += f"\nRecovery by {r['recovery_date']} (dof={dof_str})"
 
                 time_vals = r["time"]
                 dDays = r["dDays"]

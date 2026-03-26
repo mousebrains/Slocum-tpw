@@ -201,6 +201,7 @@ Intercept (95%):   100.0000+-0.0000
 Slope (95%, /day): -1.0000+-0.0000
 R-squared:         1.0000
 Pvalue:            0.0000
+DOF:               49.0
 Recovery By (95%): 2025-03-27T00:00+-0.00 (days)
 ```
 
@@ -215,6 +216,7 @@ Recovery By (95%): 2025-03-27T00:00+-0.00 (days)
   "ndays": null,
   "tau": null,
   "n_points": 51,
+  "dof": 49.0,
   "intercept": 100.0,
   "intercept_ci": 0.0,
   "slope": -1.0,
@@ -413,6 +415,7 @@ dict with:
 | `recovery_ci_days` | `float \| None` | CI half-width on recovery date (days) |
 | `r_squared`, `pvalue` | `float \| None` | Goodness-of-fit statistics |
 | `n_points` | `int` | Number of data points used |
+| `dof` | `float` | Degrees of freedom (Kish's effective n minus 2 when *tau* set, else n minus 2) |
 | `threshold`, `confidence` | `float` | Input parameters echoed back |
 | `ndays`, `tau` | `float \| None` | Window parameters echoed back |
 

@@ -56,6 +56,7 @@ class TestRecoverBy:
         assert "Slope (95%, /day):" in out
         assert "Intercept (95%):" in out
         assert "R-squared:" in out
+        assert "DOF:" in out
         assert "Recovery By (95%):" in out
 
     def test_start_stop_filter(self, tmp_path, capsys):
@@ -537,6 +538,7 @@ class TestFitRecovery:
             "r_squared",
             "pvalue",
             "n_points",
+            "dof",
             "threshold",
             "confidence",
             "ndays",
@@ -560,6 +562,37 @@ class TestFitRecovery:
         assert result is not None
         assert result["n_points"] == 5
         assert result["tau"] == 10
+
+    def test_unweighted_dof(self):
+        """Without tau, dof should be n - 2."""
+        ds = self._make_ds(n_days=51)
+        result = fit_recovery(ds, threshold=15)
+        assert result["dof"] == 49.0
+
+    def test_tau_reduces_effective_dof(self):
+        """With tau, effective dof should be less than n - 2."""
+        ds = self._make_ds(n_days=100)
+        unweighted = fit_recovery(ds, threshold=15)
+        weighted = fit_recovery(ds, threshold=15, tau=5)
+        assert weighted["dof"] < unweighted["dof"]
+        # tau=5 with 100 days: most old data is heavily downweighted,
+        # effective n should be much less than 100
+        assert weighted["dof"] < 20
+
+    def test_tau_widens_confidence_intervals(self):
+        """With tau on noisy data, CIs should be wider than unweighted."""
+        # Non-linear data so CIs are non-zero
+        times = np.datetime64("2025-01-01") + np.arange(100).astype("timedelta64[D]")
+        rng = np.random.RandomState(42)
+        battery = np.linspace(100, 50, 100) + rng.normal(0, 2, 100)
+        ds = xr.Dataset(
+            {"m_lithium_battery_relative_charge": ("time", battery)},
+            coords={"time": times},
+        )
+        unweighted = fit_recovery(ds, threshold=15)
+        weighted = fit_recovery(ds, threshold=15, tau=5)
+        assert unweighted is not None and weighted is not None
+        assert weighted["recovery_ci_days"] > unweighted["recovery_ci_days"]
 
     def test_tau_shifts_recovery_date(self):
         """tau weighting on non-linear data should differ from unweighted fit."""
