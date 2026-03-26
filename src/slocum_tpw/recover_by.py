@@ -525,20 +525,19 @@ def run(args: argparse.Namespace) -> int:
                     print(f"\n{fn} [{label}]")
                 else:
                     print(f"\n{fn}")
-                print(f"Sensor:            {args.sensor}")
-                print(f"Sensor threshold:  {args.threshold}")
                 ci_i = r["intercept_ci"] if r["intercept_ci"] is not None else float("nan")
                 ci_s = r["slope_ci"] if r["slope_ci"] is not None else float("nan")
                 ci_r = r["recovery_ci_days"] if r["recovery_ci_days"] is not None else float("nan")
-                print(f"Intercept ({ci_pct}%):   {r['intercept']:.4f}+-{ci_i:.4f}")
-                print(f"Slope ({ci_pct}%, /day):  {r['slope']:.4f}+-{ci_s:.4f}")
                 r_sq = r["r_squared"] if r["r_squared"] is not None else float("nan")
                 pv = r["pvalue"] if r["pvalue"] is not None else float("nan")
-                print(f"R-squared:         {r_sq:.4f}")
-                print(f"Pvalue:            {pv:.4f}")
-                print(f"DOF:               {r['dof']:.1f}")
                 recover_str = str(r["recovery_date"]) + ":00"
-                print(f"Recovery By ({ci_pct}%): {recover_str}+-{ci_r:.2f} (days)")
+                print(f"Sensor:      {args.sensor}, threshold: {args.threshold}")
+                print(
+                    f"Intercept:   {r['intercept']:.4f}+-{ci_i:.4f}, "
+                    f"Slope: {r['slope']:.4f}+-{ci_s:.4f}/day ({ci_pct}%)"
+                )
+                print(f"R-squared:   {r_sq:.4f}, Pvalue: {pv:.4f}, DOF: {r['dof']:.1f}")
+                print(f"Recovery By: {recover_str}+-{ci_r:.2f} days ({ci_pct}%)")
 
             results.append(
                 {
@@ -593,32 +592,33 @@ def run(args: argparse.Namespace) -> int:
                 abs_slope = abs(slope)
                 sign = "-" if slope < 0 else "+"
 
+                dof = r["dof"]
+                dof_str = f"{dof:.1f}" if dof != int(dof) else f"{int(dof)}"
+                ci_r = r["recovery_ci_days"]
+                ci_str = f"\u00b1{ci_r:.1f}d" if ci_r is not None else ""
+
                 if multi_window:
                     color = FIT_COLORS[win_idx % len(FIT_COLORS)]
                     if ndays is not None:
-                        ndays_label = f"{ndays:g}d"
+                        win_label = f"{ndays:g}d"
                     elif tau is not None:
-                        ndays_label = f"\u03c4={tau:g}d"
+                        win_label = f"\u03c4={tau:g}d"
                     else:
-                        ndays_label = "full"
+                        win_label = "full"
                     r_sq = r["r_squared"]
-                    r_sq_str = f", R\u00b2={r_sq:.3f}" if r_sq is not None else ""
-                    ci_r = r["recovery_ci_days"]
-                    ci_str = f"\u00b1{ci_r:.1f}d" if ci_r is not None else ""
-                    dof = r["dof"]
-                    dof_str = f"{dof:.1f}" if dof != int(dof) else f"{int(dof)}"
+                    r_sq_str = f" R\u00b2={r_sq:.3f}" if r_sq is not None else ""
                     fit_label = (
-                        f"{ndays_label}: {intercept:.1f}{sign}{abs_slope:.2f}/day"
-                        f"{r_sq_str}\n"
-                        f"  recover {r['recovery_date']}{ci_str}"
-                        f" (n={r['n_points']}, dof={dof_str})"
+                        f"{win_label}:{r_sq_str} "
+                        f"recover {r['recovery_date']}{ci_str} "
+                        f"(n={r['n_points']}, dof={dof_str})"
                     )
                 else:
                     color = "r"
-                    dof = r["dof"]
-                    dof_str = f"{dof:.1f}" if dof != int(dof) else f"{int(dof)}"
-                    fit_label = f"{intercept:.1f}{sign}{abs_slope:.2f} * days"
-                    fit_label += f"\nRecovery by {r['recovery_date']} (dof={dof_str})"
+                    fit_label = (
+                        f"{intercept:.1f}{sign}{abs_slope:.2f}/day, "
+                        f"recover {r['recovery_date']}{ci_str} "
+                        f"(dof={dof_str})"
+                    )
 
                 time_vals = r["time"]
                 dDays = r["dDays"]

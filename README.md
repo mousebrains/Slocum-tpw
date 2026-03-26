@@ -195,14 +195,10 @@ data points are available for fitting.
 **Text output:**
 
 ```
-Sensor:            m_lithium_battery_relative_charge
-Sensor threshold:  15
-Intercept (95%):   100.0000+-0.0000
-Slope (95%, /day): -1.0000+-0.0000
-R-squared:         1.0000
-Pvalue:            0.0000
-DOF:               49.0
-Recovery By (95%): 2025-03-27T00:00+-0.00 (days)
+Sensor:      m_lithium_battery_relative_charge, threshold: 15
+Intercept:   100.0000+-0.0000, Slope: -1.0000+-0.0000/day (95%)
+R-squared:   1.0000, Pvalue: 0.0000, DOF: 49.0
+Recovery By: 2025-03-27T00:00+-0.00 days (95%)
 ```
 
 **JSON output** (`--json`):

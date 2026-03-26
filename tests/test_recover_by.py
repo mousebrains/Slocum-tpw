@@ -42,7 +42,7 @@ class TestRecoverBy:
 
         out = capsys.readouterr().out
         assert "2025-03-27" in out
-        assert "R-squared:         1.0000" in out
+        assert "R-squared:   1.0000" in out
 
     def test_ndays_filter(self, tmp_path, capsys):
         """Using --ndays should restrict the fit window."""
@@ -53,11 +53,11 @@ class TestRecoverBy:
         assert rc == 0
 
         out = capsys.readouterr().out
-        assert "Slope (95%, /day):" in out
-        assert "Intercept (95%):" in out
+        assert "Slope:" in out
+        assert "Intercept:" in out
         assert "R-squared:" in out
         assert "DOF:" in out
-        assert "Recovery By (95%):" in out
+        assert "Recovery By:" in out
 
     def test_start_stop_filter(self, tmp_path, capsys):
         """Using --start/--stop should restrict the fit window."""
@@ -68,8 +68,8 @@ class TestRecoverBy:
         assert rc == 0
 
         out = capsys.readouterr().out
-        assert "Slope (95%, /day):" in out
-        assert "Recovery By (95%):" in out
+        assert "Slope:" in out
+        assert "Recovery By:" in out
 
     def test_missing_variable(self, tmp_path):
         """Missing sensor variable should skip the file and return failure."""
@@ -243,9 +243,10 @@ class TestRecoverBy:
         assert rc == 0
 
         out = capsys.readouterr().out
-        assert "Intercept (99%):" in out
-        assert "Slope (99%, /day):" in out
-        assert "Recovery By (99%):" in out
+        assert "(99%)" in out
+        assert "Intercept:" in out
+        assert "Slope:" in out
+        assert "Recovery By:" in out
 
     def test_start_only(self, tmp_path, capsys):
         """Using --start without --stop should restrict start but use all data to end."""
