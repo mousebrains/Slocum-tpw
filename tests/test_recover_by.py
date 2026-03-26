@@ -7,7 +7,7 @@ import pytest
 import xarray as xr
 
 from slocum_tpw.cli import main
-from slocum_tpw.recover_by import fit_recovery, prepare_dataset
+from slocum_tpw.recover_by import _safe_sqrt, fit_recovery, prepare_dataset
 
 
 def make_linear_nc(path, start="2025-01-01", n_days=51, batt_start=100.0, batt_end=50.0):
@@ -467,6 +467,14 @@ class TestPrepareDataset:
         with pytest.raises(KeyError, match="Cannot auto-detect"):
             prepare_dataset(nc, time_var=None)
 
+    def test_explicit_time_var_not_found(self, tmp_path):
+        """Explicit time_var that doesn't exist should raise KeyError."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        with pytest.raises(KeyError, match="bogus"):
+            prepare_dataset(nc, time_var="bogus")
+
 
 class TestFitRecovery:
     def _make_ds(self, n_days=51, batt_start=100.0, batt_end=50.0):
@@ -885,3 +893,69 @@ class TestPlotEdgeCases:
         assert rc == 0
         assert plot_path.exists()
         assert plot_path.stat().st_size > 0
+
+    def test_full_keyword_plot_label(self, tmp_path):
+        """--ndays full,7 plot should show 'full' label in legend."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc, n_days=100)
+        plot_path = tmp_path / "plot.png"
+
+        rc = _run(["--ndays", "full,7", "--output", str(plot_path), str(nc)])
+        assert rc == 0
+        assert plot_path.exists()
+
+    def test_tau_window_fail_log(self, tmp_path, capsys):
+        """A tau window that fails should log with tau label and not crash."""
+        nc = tmp_path / "test.nc"
+        # Only 4 days of data; ndays=1 gives 2 points (fails), tau=1 succeeds
+        make_linear_nc(nc, n_days=4)
+
+        rc = _run(["--ndays", "1", "--tau", "1", str(nc)])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        assert "Recovery By" in out
+
+
+class TestSafeSqrt:
+    def test_nan_input(self):
+        """_safe_sqrt should propagate NaN."""
+        result = _safe_sqrt(float("nan"))
+        assert np.isnan(result)
+
+    def test_negative_input(self):
+        """_safe_sqrt should clamp negative to 0."""
+        assert _safe_sqrt(-1.0) == 0.0
+
+    def test_positive_input(self):
+        """_safe_sqrt should return sqrt of positive values."""
+        assert _safe_sqrt(4.0) == pytest.approx(2.0)
+
+
+class TestParseEdgeCases:
+    def test_trailing_comma(self, tmp_path, capsys):
+        """--ndays with trailing comma should be handled gracefully."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc, n_days=100)
+
+        rc = _run(["--ndays", "7,,30", "--threshold", "15", str(nc)])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        assert "[7d]" in out
+        assert "[30d]" in out
+        assert out.count("Recovery By") == 2
+
+
+class TestMainModule:
+    def test_python_m_version(self):
+        """python -m slocum_tpw --version should work."""
+        import subprocess
+
+        result = subprocess.run(
+            ["python3", "-m", "slocum_tpw", "--version"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "slocum-tpw" in result.stdout
