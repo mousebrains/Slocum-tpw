@@ -515,6 +515,43 @@ class TestMultiNdays:
         assert "[10d]" not in out
         assert "Recovery By" in out
 
+    def test_full_keyword(self, tmp_path, capsys):
+        """--ndays full should use the entire dataset."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc, n_days=100)
+
+        rc = _run(["--ndays", "7,full", "--threshold", "15", str(nc)])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        assert "[7d]" in out
+        assert "[full]" in out
+        assert out.count("Recovery By") == 2
+
+    def test_full_keyword_json(self, tmp_path, capsys):
+        """--ndays full should appear as null ndays in JSON output."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc, n_days=100)
+
+        rc = _run(["--json", "--ndays", "7,full", "--threshold", "15", str(nc)])
+        assert rc == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert len(data) == 2
+        assert data[0]["ndays"] == 7.0
+        assert data[1]["ndays"] is None
+
+    def test_full_keyword_case_insensitive(self, tmp_path, capsys):
+        """--ndays FULL and Full should both work."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc, n_days=100)
+
+        rc = _run(["--ndays", "FULL", "--threshold", "15", str(nc)])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        assert "Recovery By" in out
+
 
 class TestTau:
     def test_single_tau(self, tmp_path, capsys):

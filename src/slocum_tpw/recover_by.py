@@ -251,10 +251,14 @@ def fit_recovery(
     }
 
 
-def _parse_float_list(args):
+def _parse_float_list(args, allow_full=False):
     """Parse repeated and/or comma-separated float arguments.
 
-    Returns None if args is None or empty.
+    When *allow_full* is True, the keyword ``full`` (case-insensitive) is
+    accepted and stored as ``None`` in the returned list to represent the
+    full dataset.
+
+    Returns None if *args* is None or empty.
     """
     if not args:
         return None
@@ -262,7 +266,11 @@ def _parse_float_list(args):
     for arg in args:
         for part in arg.split(","):
             part = part.strip()
-            if part:
+            if not part:
+                continue
+            if allow_full and part.lower() == "full":
+                result.append(None)
+            else:
                 result.append(float(part))
     return result if result else None
 
@@ -285,7 +293,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--ndays",
         type=str,
         action="append",
-        help="Days from last date to include (repeatable, comma-separated)",
+        help="Days from last date to include; use 'full' for the entire dataset "
+        "(repeatable, comma-separated, e.g. --ndays 3,7,full)",
     )
     parser.add_argument(
         "--tau",
@@ -323,13 +332,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 def run(args: argparse.Namespace) -> int:
     """Execute the recover-by command."""
     try:
-        ndays_list = _parse_float_list(args.ndays)
+        ndays_list = _parse_float_list(args.ndays, allow_full=True)
         tau_list = _parse_float_list(args.tau)
     except ValueError as e:
         logging.error("Invalid numeric value for --ndays/--tau: %s", e)
         return 2
 
-    if ndays_list is not None and any(n <= 0 for n in ndays_list):
+    if ndays_list is not None and any(n is not None and n <= 0 for n in ndays_list):
         logging.error("--ndays values must be positive")
         return 2
     if tau_list is not None and any(v <= 0 for v in tau_list):

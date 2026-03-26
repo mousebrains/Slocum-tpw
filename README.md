@@ -172,7 +172,7 @@ slocum-tpw recover-by [options] FILE [FILE ...]
 | `--threshold PCT` | Battery percentage at which recovery should happen (default: `15`) |
 | `--time NAME` | Name of time variable (default: `time`) |
 | `--confidence LEVEL` | Confidence level for intervals, 0 < x < 1 (default: `0.95`) |
-| `--ndays N` | Use only the last N days of data; repeatable and/or comma-separated (e.g. `--ndays 3,7,30`). Cannot combine with `--start`/`--stop` |
+| `--ndays N` | Use only the last N days of data; use `full` for the entire dataset. Repeatable and/or comma-separated (e.g. `--ndays 3,7,full`). Cannot combine with `--start`/`--stop` |
 | `--tau T` | Exponential decay time constant in days — full dataset weighted by exp(-age/T); repeatable and/or comma-separated. Cannot combine with `--start`/`--stop` |
 | `--start TIME` | Use data after this UTC time (cannot combine with `--ndays`/`--tau`) |
 | `--stop TIME` | Use data before this UTC time (cannot combine with `--ndays`/`--tau`) |
@@ -235,8 +235,8 @@ slocum-tpw recover-by --threshold 15 flight.nc
 # Use only the last 14 days and save a plot
 slocum-tpw recover-by --ndays 14 --output battery.png flight.nc
 
-# Compare multiple time windows on one plot
-slocum-tpw recover-by --ndays 3,7,30 --plot flight.nc
+# Compare multiple time windows on one plot (use 'full' for entire dataset)
+slocum-tpw recover-by --ndays 3,7,full --plot flight.nc
 
 # Exponential downweighting (recent data weighted more)
 slocum-tpw recover-by --tau 5,15 --output battery.png flight.nc
