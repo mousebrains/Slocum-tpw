@@ -567,6 +567,7 @@ def run(args: argparse.Namespace) -> int:
                 if not data_plotted:
                     # Plot raw data once per file
                     data_plotted = True
+                    ax.set_title(f"{Path(fn).name} (n={ds.time.size})")
                     if multi_window:
                         ax.plot(
                             ds.time,
@@ -610,7 +611,7 @@ def run(args: argparse.Namespace) -> int:
                     fit_label = (
                         f"{win_label} {r['recovery_date']}{ci_str}"
                         f"{r_sq_str} "
-                        f"(n={r['n_points']}, dof={dof_str})"
+                        f"(dof={dof_str})"
                     )
                 else:
                     color = "r"
