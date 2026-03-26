@@ -663,7 +663,7 @@ def run(args: argparse.Namespace) -> int:
         if plotted_indices:
             ax = fig.axes[-1]
             ax.set_xlabel("Time (UTC)")
-            plt.title(f"{args.sensor} threshold {args.threshold}")
+            fig.suptitle(f"{args.sensor} threshold {args.threshold}")
             plt.xticks(rotation=45)
             plt.tight_layout()
             if args.output:

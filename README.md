@@ -186,7 +186,11 @@ The tool fits a linear model `sensor = intercept + slope * days` to the battery
 data and solves for the day when the sensor reaches the threshold. Uncertainty
 is propagated through partial derivatives of the recovery date with respect to
 slope and intercept, using the covariance matrix from `numpy.polyfit`.
-Confidence intervals use the t-distribution with n-2 degrees of freedom.
+Confidence intervals use the t-distribution.  For unweighted fits the degrees
+of freedom are n-2; for `--tau` weighted fits the effective degrees of freedom
+are computed via Kish's formula (effective n minus 2) and the covariance matrix
+is rescaled accordingly, producing wider (more honest) intervals when old data
+is heavily downweighted.
 
 The tool handles multiple time formats (CF datetime coordinates, float epoch
 seconds), removes duplicates and NaN values, and validates that at least 3
@@ -417,7 +421,9 @@ dict with:
 
 When `tau` is set, the fit uses weighted least squares with effective weight
 `exp(-age/tau)` where *age* is days from the most recent observation. R-squared
-is computed as weighted R-squared.
+is computed as weighted R-squared.  The covariance matrix is rescaled using
+Kish's effective sample size so that confidence intervals correctly reflect the
+reduced information content of downweighted data.
 
 #### `FIT_COLORS`
 
