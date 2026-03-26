@@ -196,7 +196,12 @@ def fit_recovery(
     Returns
     -------
     dict or None
-        Returns None if the fit fails (insufficient data or near-zero slope).
+        Returns None when the fit cannot be performed:
+
+        - fewer than 3 data points after windowing
+        - polynomial fit fails (singular matrix)
+        - near-zero slope (``abs(slope) < 1e-10``)
+
         On success, a dict with:
 
         - **time** (*xr.DataArray*) — time coordinates used in the fit

@@ -265,6 +265,41 @@ class TestRecoverBy:
         rc = _run(["--ndays", "7", "--start", "2025-01-10", str(nc)])
         assert rc == 2
 
+    def test_confidence_zero(self, tmp_path):
+        """--confidence 0 should be rejected."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        rc = _run(["--confidence", "0", str(nc)])
+        assert rc == 2
+
+    def test_confidence_one(self, tmp_path):
+        """--confidence 1 should be rejected."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        rc = _run(["--confidence", "1", str(nc)])
+        assert rc == 2
+
+    def test_multiple_files_partial_failure(self, tmp_path, capsys):
+        """One bad file should not prevent good files from processing."""
+        nc_good = tmp_path / "good.nc"
+        nc_bad = tmp_path / "bad.nc"
+        make_linear_nc(nc_good)
+        # bad file has wrong sensor name
+        times = np.datetime64("2025-01-01") + np.arange(10).astype("timedelta64[D]")
+        ds = xr.Dataset(
+            {"wrong_sensor": ("time", np.linspace(100, 90, 10))},
+            coords={"time": times},
+        )
+        ds.to_netcdf(nc_bad)
+
+        rc = _run(["--threshold", "15", str(nc_good), str(nc_bad)])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        assert "Recovery By" in out
+
 
 class TestPrepareDataset:
     def test_from_file(self, tmp_path):
@@ -517,6 +552,14 @@ class TestFitRecovery:
         assert result["tau"] == 10
         assert result["ndays"] is None
         assert result["n_points"] == 100
+
+    def test_tau_with_limited_data(self):
+        """tau with only a few days of data should still work."""
+        ds = self._make_ds(n_days=5)
+        result = fit_recovery(ds, threshold=15, tau=10)
+        assert result is not None
+        assert result["n_points"] == 5
+        assert result["tau"] == 10
 
     def test_tau_shifts_recovery_date(self):
         """tau weighting on non-linear data should differ from unweighted fit."""
