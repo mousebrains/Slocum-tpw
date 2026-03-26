@@ -34,7 +34,7 @@ ruff format src/ tests/
 - **src/slocum_tpw/decode_argos.py** — Parses ARGOS satellite position messages into NetCDF. Regex-based line parser. Public API: `proc_file()`, `process_files()`.
 - **src/slocum_tpw/log_harvest.py** — Parses Slocum glider log files (binary read, UTF-8 decode). Extracts GPS, sensors, timestamps. Bins to 100-second resolution using hash-table lookup. Public API: `parse_log_file()`, `process_files()`.
 - **src/slocum_tpw/mk_combined.py** — Merges log, flight, and science NetCDF data for a single glider. Computes oceanographic variables (depth, salinity, potential temperature, density) via GSW/TEOS-10. Outputs CF-1.13 compliant NetCDF. Public API: `mk_combo()`.
-- **src/slocum_tpw/recover_by.py** — Estimates glider recovery date from battery decay. Linear regression on battery charge over time, with confidence intervals via t-distribution. Supports JSON output and matplotlib plots.
+- **src/slocum_tpw/recover_by.py** — Estimates glider recovery date from battery decay. Linear regression on battery charge over time, with confidence intervals via t-distribution. Supports multiple `--ndays` windows (repeated/comma-separated, `full` keyword for entire dataset), `--tau` exponential downweighting (also repeatable/comma-separated), auto-detection of time variables (POSIX floats, CF units, Slocum conventions), JSON output, and matplotlib plots. Public API: `prepare_dataset()`, `fit_recovery()`, `FIT_COLORS`.
 - **src/slocum_tpw/slocum_utils.py** — DDMM.MM to decimal degrees conversion. Public API: `mk_degrees_scalar()`, `mk_degrees()`.
 
 Each subcommand module exposes: `add_arguments(parser)`, `run(args) -> int`, and its core processing functions.

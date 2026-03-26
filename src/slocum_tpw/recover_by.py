@@ -19,6 +19,7 @@ from scipy.stats import t
 
 S_PER_DAY = 86400  # seconds per day
 ONE_DAY = np.timedelta64(1, "D")
+FIT_COLORS = ["tab:green", "tab:orange", "tab:purple", "tab:red", "tab:brown", "tab:pink"]
 
 
 def _safe_sqrt(x):
@@ -26,6 +27,339 @@ def _safe_sqrt(x):
     if np.isnan(x):
         return float("nan")
     return float(np.sqrt(max(0, x)))
+
+
+def _find_time_var(ds, sensor):
+    """Auto-detect the time variable in a dataset.
+
+    Search order:
+
+    1. ``"time"`` or ``"t"`` by exact name
+    2. Any variable with ``datetime64`` dtype
+    3. Any variable with CF time units (``"... since ..."`` in ``units`` attr)
+    4. Any variable with ``units='timestamp'``
+    5. Any variable on the sensor's dimension whose name ends with ``_time``
+
+    Returns the variable name, or raises KeyError if none found.
+    """
+    all_names = set(ds.data_vars) | set(ds.coords)
+
+    # 1. Well-known names
+    for name in ("time", "t"):
+        if name in all_names:
+            return name
+
+    # Restrict candidates to the sensor's dimension when possible
+    sensor_dims = set(ds[sensor].dims) if sensor in ds else set()
+
+    def _on_sensor_dim(name):
+        if not sensor_dims:
+            return True
+        return bool(set(ds[name].dims) & sensor_dims)
+
+    # 2. datetime64 dtype
+    for name in all_names:
+        if ds[name].dtype.kind == "M" and _on_sensor_dim(name):
+            return name
+
+    # 3. CF time units ("... since ...")
+    for name in all_names:
+        units = ds[name].attrs.get("units", "")
+        if isinstance(units, str) and " since " in units and _on_sensor_dim(name):
+            return name
+
+    # 4. units='timestamp' (Slocum convention for POSIX float times)
+    for name in all_names:
+        units = ds[name].attrs.get("units", "")
+        if isinstance(units, str) and units.lower() == "timestamp" and _on_sensor_dim(name):
+            return name
+
+    # 5. Name ends with _time, on the sensor's dimension
+    for name in all_names:
+        if name.endswith("_time") and _on_sensor_dim(name):
+            return name
+
+    raise KeyError(
+        f"Cannot auto-detect time variable in dataset "
+        f"(variables: {sorted(all_names)}). Use time_var to specify it."
+    )
+
+
+def prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_charge"):
+    """Load and clean a dataset for recovery fitting.
+
+    Parameters
+    ----------
+    source : str, Path, or xr.Dataset
+        NetCDF filename or an already-opened Dataset.
+    time_var : str or None
+        Name of the time variable.  When ``None`` (the default), the
+        variable is auto-detected by searching for well-known names
+        (``time``, ``t``), datetime64 dtypes, CF time units, and
+        Slocum conventions (``units='timestamp'``, names ending in
+        ``_time``).
+    sensor : str
+        Name of the battery sensor variable.
+
+    Returns
+    -------
+    xr.Dataset
+        Cleaned dataset with 'time' dimension coordinate and sensor variable,
+        sorted by time with duplicates and NaN sensor values removed.
+
+    Raises
+    ------
+    KeyError
+        If required variables are not found in the dataset, or the time
+        variable cannot be auto-detected.
+    OSError
+        If *source* is a path and the file cannot be opened.
+    """
+    if isinstance(source, (str, Path)):
+        ds = xr.open_dataset(source)
+    else:
+        ds = source.copy()
+
+    if sensor not in ds:
+        raise KeyError(f"Variable '{sensor}' not found in dataset")
+
+    if time_var is None:
+        time_var = _find_time_var(ds, sensor)
+        logging.debug("Auto-detected time variable: %s", time_var)
+
+    if time_var not in ds:
+        raise KeyError(f"Variable '{time_var}' not found in dataset")
+
+    ds = ds.drop_vars(set(ds) - {time_var, sensor})
+
+    # Get time values, converting float epoch seconds to datetime64
+    time_vals = ds[time_var].values
+    needs_reassign = False
+
+    if time_vals.dtype.kind == "f":
+        time_vals = time_vals.astype("datetime64[s]")
+        needs_reassign = True
+    elif time_var != "time" or "time" not in ds.dims:
+        needs_reassign = True
+
+    if needs_reassign:
+        sensor_dims = ds[sensor].dims
+        dim_name = sensor_dims[0] if sensor_dims else next(iter(ds.dims))
+        logging.debug("Setting time coordinate from %s on dimension %s", time_var, dim_name)
+        ds = ds.assign_coords(time=(dim_name, time_vals))
+        if dim_name != "time":
+            ds = ds.swap_dims({dim_name: "time"})
+
+    if time_var != "time" and time_var in ds:
+        ds = ds.drop_vars(time_var)
+
+    ds = ds.drop_duplicates("time", keep="first")
+    ds = ds.sel(time=ds.time[np.logical_not(ds[sensor].isnull())])
+    ds = ds.sortby("time")
+
+    return ds.load()
+
+
+def fit_recovery(
+    ds,
+    sensor="m_lithium_battery_relative_charge",
+    threshold=15,
+    confidence=0.95,
+    ndays=None,
+    tau=None,
+    start=None,
+    stop=None,
+):
+    """Fit a linear model to battery data and estimate recovery date.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Cleaned dataset from prepare_dataset().
+    sensor : str
+        Name of the battery sensor variable.
+    threshold : float
+        Battery percentage at which recovery should happen.
+    confidence : float
+        Confidence level for intervals (0 < confidence < 1).
+    ndays : float or None
+        If set, only use the last ndays days of data.
+    tau : float or None
+        If set, apply exponential downweighting to older data.
+        Each point is weighted by exp(-age/tau) where age is in days
+        from the most recent observation.
+    start : str or None
+        If set, only use data after this UTC time.
+    stop : str or None
+        If set, only use data before this UTC time.
+
+    Returns
+    -------
+    dict or None
+        Returns None when the fit cannot be performed:
+
+        - fewer than 3 data points after windowing
+        - polynomial fit fails (singular matrix)
+        - near-zero slope (``abs(slope) < 1e-10``)
+
+        On success, a dict with:
+
+        - **time** (*xr.DataArray*) — time coordinates used in the fit
+        - **sensor_values** (*xr.DataArray*) — sensor values used
+        - **dDays** (*np.ndarray, float64*) — days since first data point
+        - **slope**, **intercept** (*float*) — linear fit coefficients
+        - **slope_ci**, **intercept_ci** (*float | None*) — CI half-widths
+        - **recovery_date** (*np.datetime64*) — estimated recovery date
+          (hourly resolution)
+        - **recovery_ci_days** (*float | None*) — CI half-width in days
+        - **r_squared**, **pvalue** (*float | None*) — goodness-of-fit stats
+        - **n_points** (*int*) — number of data points used
+        - **dof** (*float*) — degrees of freedom used for CIs and p-value
+          (Kish's effective n minus 2 when *tau* is set, otherwise n minus 2)
+        - **threshold**, **confidence** (*float*) — input parameters
+        - **ndays**, **tau** (*float | None*) — window parameters
+    """
+    if ndays is not None:
+        etime = ds.time[-1]
+        stime = etime - np.timedelta64(int(ndays * S_PER_DAY), "s")
+        ds = ds.sel(time=slice(stime, etime))
+    elif start is not None or stop is not None:
+        stime = np.datetime64(start) if start is not None else ds.time[0]
+        etime = np.datetime64(stop) if stop is not None else ds.time[-1]
+        ds = ds.sel(time=slice(stime, etime))
+
+    if ds.time.size < 3:
+        logging.warning("Not enough data to fit (%d points, need >= 3)", ds.time.size)
+        return None
+
+    dDays = (ds.time.data - ds.time.data[0]) / ONE_DAY
+
+    # Exponential downweighting: polyfit squares its w argument,
+    # so pass sqrt of the desired effective weight.
+    if tau is not None:
+        age = dDays[-1] - dDays  # days from newest (0 for latest)
+        fit_weights = np.exp(-age / (2 * tau))
+    else:
+        fit_weights = None
+
+    try:
+        coeffs, cov = np.polyfit(dDays, ds[sensor], 1, cov=True, w=fit_weights)
+    except (np.linalg.LinAlgError, ValueError) as e:
+        logging.warning("Fit failed: %s", e)
+        return None
+
+    slope, intercept = coeffs
+
+    if abs(slope) < 1e-10:
+        logging.warning("Near-zero slope — cannot estimate recovery date")
+        return None
+
+    d_recovery = (threshold - intercept) / slope
+    t_recover_by = ds.time[0].data + np.timedelta64(round(d_recovery * S_PER_DAY), "s")
+    # Round to nearest hour
+    t_recover_by = (t_recover_by + np.timedelta64(30, "m")).astype("datetime64[h]")
+
+    if d_recovery < 0:
+        logging.warning("Recovery date is in the past (positive slope — battery increasing?)")
+
+    if not np.all(np.isfinite(cov)):
+        logging.warning("Unstable fit — confidence intervals may be unreliable")
+
+    # Degrees of freedom.  polyfit uses dof = n - 2, which is correct for
+    # uniform weights.  With exponential weighting the effective sample
+    # size is smaller (Kish's formula), so we rescale the covariance
+    # matrix and use the effective dof for the t-distribution.
+    n = dDays.size
+    if tau is not None:
+        eff_w = np.exp(-age / tau)  # effective weights
+        n_eff = float(np.sum(eff_w) ** 2 / np.sum(eff_w**2))
+        df = max(n_eff - 2, 1)
+        # Rescale covariance: polyfit divided by (n-2), we want (n_eff-2)
+        cov = cov * (n - 2) / df
+    else:
+        eff_w = None
+        df = float(n - 2)
+
+    alpha = 1 - confidence
+
+    # Propagate uncertainty including covariance between slope and intercept
+    # d_recovery = (threshold - intercept) / slope
+    # ∂d/∂intercept = -1/slope, ∂d/∂slope = -d_recovery/slope
+    var_recovery = (cov[1, 1] + d_recovery**2 * cov[0, 0] + 2 * d_recovery * cov[0, 1]) / slope**2
+    sigma_recovery = _safe_sqrt(var_recovery)
+    sigma_intercept = _safe_sqrt(cov[1, 1])
+    sigma_slope = _safe_sqrt(cov[0, 0])
+
+    # R-squared (weighted if tau is set)
+    y_pred = intercept + slope * dDays
+    if eff_w is not None:
+        w_mean = float(np.average(ds[sensor], weights=eff_w))
+        ss_res = np.sum(eff_w * (ds[sensor] - y_pred) ** 2).item()
+        ss_tot = np.sum(eff_w * (ds[sensor] - w_mean) ** 2).item()
+    else:
+        ss_res = np.sum((ds[sensor] - y_pred) ** 2).item()
+        ss_tot = np.sum((ds[sensor] - ds[sensor].mean()) ** 2).item()
+    if ss_tot == 0:
+        r_squared = float("nan")
+    else:
+        r_squared = 1 - ss_res / ss_tot
+
+    # p-value for slope
+    if sigma_slope > 0:
+        t_stat = slope / sigma_slope
+        pvalue = 2 * (1 - t.cdf(abs(t_stat), df))
+    else:
+        pvalue = float("nan")
+
+    # Confidence intervals
+    ts = abs(t.ppf(alpha / 2, df))
+    ci_intercept = sigma_intercept * ts
+    ci_slope = sigma_slope * ts
+    ci_recovery = sigma_recovery * ts
+
+    return {
+        "time": ds.time,
+        "sensor_values": ds[sensor],
+        "dDays": dDays,
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "slope_ci": float(ci_slope) if np.isfinite(ci_slope) else None,
+        "intercept_ci": float(ci_intercept) if np.isfinite(ci_intercept) else None,
+        "recovery_date": t_recover_by,
+        "recovery_ci_days": float(ci_recovery) if np.isfinite(ci_recovery) else None,
+        "r_squared": float(r_squared) if np.isfinite(r_squared) else None,
+        "pvalue": float(pvalue) if np.isfinite(pvalue) else None,
+        "n_points": int(n),
+        "dof": df,
+        "threshold": threshold,
+        "confidence": confidence,
+        "ndays": ndays,
+        "tau": tau,
+    }
+
+
+def _parse_float_list(args, allow_full=False):
+    """Parse repeated and/or comma-separated float arguments.
+
+    When *allow_full* is True, the keyword ``full`` (case-insensitive) is
+    accepted and stored as ``None`` in the returned list to represent the
+    full dataset.
+
+    Returns None if *args* is None or empty.
+    """
+    if not args:
+        return None
+    result = []
+    for arg in args:
+        for part in arg.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if allow_full and part.lower() == "full":
+                result.append(None)
+            else:
+                result.append(float(part))
+    return result if result else None
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -42,13 +376,25 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         default="m_lithium_battery_relative_charge",
         help="Sensor name to fit to",
     )
-    grp = parser.add_mutually_exclusive_group()
-    grp.add_argument("--ndays", type=float, help="Number of days from last date to include")
-    grp.add_argument("--start", type=str, help="Only use data after this UTC time")
+    parser.add_argument(
+        "--ndays",
+        type=str,
+        action="append",
+        help="Days from last date to include; use 'full' for the entire dataset "
+        "(repeatable, comma-separated, e.g. --ndays 3,7,full)",
+    )
+    parser.add_argument(
+        "--tau",
+        type=str,
+        action="append",
+        help="Exponential decay time constant in days — full dataset weighted by "
+        "exp(-age/tau) (repeatable, comma-separated)",
+    )
+    parser.add_argument("--start", type=str, help="Only use data after this UTC time")
     parser.add_argument(
         "--stop",
         type=str,
-        help="Only use data before this UTC time (cannot be used with --ndays)",
+        help="Only use data before this UTC time",
     )
     parser.add_argument(
         "--threshold",
@@ -56,7 +402,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         default=15,
         help="Battery percentage at which recovery should happen",
     )
-    parser.add_argument("--time", type=str, default="time", help="Name of time variable")
+    parser.add_argument(
+        "--time",
+        type=str,
+        default=None,
+        help="Name of time variable (auto-detected if omitted)",
+    )
     parser.add_argument(
         "--confidence",
         type=float,
@@ -72,16 +423,43 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace) -> int:
     """Execute the recover-by command."""
-    if args.ndays is not None and args.stop is not None:
-        logging.error("--ndays and --stop cannot be used together")
+    try:
+        ndays_list = _parse_float_list(args.ndays, allow_full=True)
+        tau_list = _parse_float_list(args.tau)
+    except ValueError as e:
+        logging.error("Invalid numeric value for --ndays/--tau: %s", e)
         return 2
 
+    if ndays_list is not None and any(n is not None and n <= 0 for n in ndays_list):
+        logging.error("--ndays values must be positive")
+        return 2
+    if tau_list is not None and any(v <= 0 for v in tau_list):
+        logging.error("--tau values must be positive")
+        return 2
+
+    has_windows = ndays_list is not None or tau_list is not None
+    if has_windows and args.start is not None:
+        logging.error("--ndays/--tau and --start cannot be used together")
+        return 2
+    if has_windows and args.stop is not None:
+        logging.error("--ndays/--tau and --stop cannot be used together")
+        return 2
     if not 0 < args.confidence < 1:
         logging.error("--confidence must be between 0 and 1")
         return 2
 
-    alpha = 1 - args.confidence
     ci_pct = f"{args.confidence * 100:g}"
+
+    # Build list of (ndays, tau, start, stop) windows to fit
+    windows = []
+    if ndays_list:
+        windows.extend((nd, None, None, None) for nd in ndays_list)
+    if tau_list:
+        windows.extend((None, tau, None, None) for tau in tau_list)
+    if not windows:
+        windows.append((None, None, args.start, args.stop))
+
+    multi_window = len(windows) > 1
 
     if args.plot or args.output:
         import matplotlib
@@ -99,181 +477,178 @@ def run(args: argparse.Namespace) -> int:
 
     for index, fn in enumerate(args.filename):
         try:
-            with xr.open_dataset(fn) as ds:
-                var_names = (args.time, args.sensor)
-                missing = [name for name in var_names if name not in ds]
-                if missing:
-                    for name in missing:
-                        logging.error("%s variable not present in %s", name, fn)
-                    continue
-
-                ds = ds.drop_vars(set(ds) - set(var_names))
-
-                # Ensure "time" is a datetime dimension coordinate
-                if ds[args.time].dtype.kind == "f":
-                    time_vals = ds[args.time].values.astype("datetime64[s]")
-                elif "time" not in ds.dims:
-                    time_vals = ds[args.time].values
-                else:
-                    time_vals = None
-
-                if time_vals is not None:
-                    # Find the dimension the sensor variable uses
-                    sensor_dims = ds[args.sensor].dims
-                    dim_name = sensor_dims[0] if sensor_dims else next(iter(ds.dims))
-                    logging.debug(
-                        "Setting time coordinate from %s on dimension %s", args.time, dim_name
-                    )
-                    ds = ds.assign_coords(time=(dim_name, time_vals))
-                    if dim_name != "time":
-                        ds = ds.swap_dims({dim_name: "time"})
-
-                ds = ds.drop_duplicates("time", keep="first")
-                ds = ds.sel(time=ds.time[np.logical_not(ds[args.sensor].isnull())])
-                ds = ds.sortby("time")
-
-                if args.start is not None or args.stop is not None:
-                    stime = np.datetime64(args.start) if args.start is not None else ds.time[0]
-                    etime = np.datetime64(args.stop) if args.stop is not None else ds.time[-1]
-                    ds = ds.sel(time=slice(stime, etime))
-                elif args.ndays is not None:
-                    etime = ds.time[-1]
-                    stime = etime - np.timedelta64(int(args.ndays * S_PER_DAY), "s")
-                    ds = ds.sel(time=slice(stime, etime))
-
-                if ds.time.size < 3:
-                    logging.error(
-                        "Not enough data to fit in %s (%d points, need >= 3)", fn, ds.time.size
-                    )
-                    continue
-
-                ds["dDays"] = ("time", (ds.time.data - ds.time.data[0]) / ONE_DAY)
-
-                # Linear fit: sensor = intercept + slope * dDays
-                coeffs, cov = np.polyfit(ds.dDays, ds[args.sensor], 1, cov=True)
-                slope, intercept = coeffs
-                # cov[0,0]=Var(slope), cov[1,1]=Var(intercept), cov[0,1]=Cov(slope,intercept)
-
-                if abs(slope) < 1e-10:
-                    logging.error("Near-zero slope in %s — cannot estimate recovery date", fn)
-                    continue
-
-                d_recovery = (args.threshold - intercept) / slope
-                t_recover_by = ds.time[0].data + np.timedelta64(round(d_recovery * S_PER_DAY), "s")
-                # Round to nearest hour
-                t_recover_by = (t_recover_by + np.timedelta64(30, "m")).astype("datetime64[h]")
-
-                if d_recovery < 0:
-                    logging.warning(
-                        "Recovery date is in the past for %s "
-                        "(positive slope — battery increasing?)",
-                        fn,
-                    )
-
-                # Validate covariance matrix
-                if not np.all(np.isfinite(cov)):
-                    logging.warning(
-                        "Unstable fit for %s — confidence intervals may be unreliable", fn
-                    )
-
-                # Propagate uncertainty including covariance between slope and intercept
-                # d_recovery = (threshold - intercept) / slope
-                # ∂d/∂intercept = -1/slope, ∂d/∂slope = -d_recovery/slope
-                var_recovery = (
-                    cov[1, 1] + d_recovery**2 * cov[0, 0] + 2 * d_recovery * cov[0, 1]
-                ) / slope**2
-                sigma_recovery = _safe_sqrt(var_recovery)
-
-                sigma_intercept = _safe_sqrt(cov[1, 1])
-                sigma_slope = _safe_sqrt(cov[0, 0])
-
-                # R-squared
-                y_pred = intercept + slope * ds.dDays
-                ss_res = np.sum((ds[args.sensor] - y_pred) ** 2).item()
-                ss_tot = np.sum((ds[args.sensor] - ds[args.sensor].mean()) ** 2).item()
-                if ss_tot == 0:
-                    r_squared = float("nan")
-                    logging.warning("Constant sensor values in %s — R² undefined", fn)
-                else:
-                    r_squared = 1 - ss_res / ss_tot
-
-                # p-value for slope
-                n = ds.dDays.size
-                df = n - 2
-                if sigma_slope > 0:
-                    t_stat = slope / sigma_slope
-                    pvalue = 2 * (1 - t.cdf(abs(t_stat), df))
-                else:
-                    pvalue = float("nan")
-
-                # Confidence intervals
-                ts = abs(t.ppf(alpha / 2, df))
-                ci_intercept = sigma_intercept * ts
-                ci_slope = sigma_slope * ts
-                ci_recovery = sigma_recovery * ts
-
-                if not args.json_output:
-                    print(f"\n{fn}")
-                    print(f"Sensor:            {args.sensor}")
-                    print(f"Sensor threshold:  {args.threshold}")
-                    print(f"Intercept ({ci_pct}%):   {intercept:.4f}+-{ci_intercept:.4f}")
-                    print(f"Slope ({ci_pct}%, /day):  {slope:.4f}+-{ci_slope:.4f}")
-                    print(f"R-squared:         {r_squared:.4f}")
-                    print(f"Pvalue:            {pvalue:.4f}")
-                    recover_str = str(t_recover_by) + ":00"
-                    print(f"Recovery By ({ci_pct}%): {recover_str}+-{ci_recovery:.2f} (days)")
-
-                results.append(
-                    {
-                        "file": fn,
-                        "sensor": args.sensor,
-                        "threshold": args.threshold,
-                        "confidence": args.confidence,
-                        "n_points": int(n),
-                        "intercept": float(intercept),
-                        "intercept_ci": float(ci_intercept) if np.isfinite(ci_intercept) else None,
-                        "slope": float(slope),
-                        "slope_ci": float(ci_slope) if np.isfinite(ci_slope) else None,
-                        "r_squared": float(r_squared) if np.isfinite(r_squared) else None,
-                        "pvalue": float(pvalue) if np.isfinite(pvalue) else None,
-                        "recovery_date": str(t_recover_by),
-                        "recovery_ci_days": float(ci_recovery)
-                        if np.isfinite(ci_recovery)
-                        else None,
-                    }
-                )
-
-                success = True
-
-                if args.plot or args.output:
-                    abs_slope = abs(slope)
-                    input_title = Path(fn).name
-                    if slope < 0:
-                        fit_title = f"{intercept:.1f}-{abs_slope:.2f} * days"
-                    else:
-                        fit_title = f"{intercept:.1f}+{abs_slope:.2f} * days"
-                    fit_title += f"\nRecovery by {t_recover_by}"
-                    ax = axs[index, 0]
-                    plotted_indices.add(index)
-                    ax.plot(ds.time, ds[args.sensor], "o", label=input_title)
-                    ax.plot(ds.time, intercept + slope * ds.dDays, "r", label=fit_title)
-                    # Extend fit line to recovery date
-                    if t_recover_by > ds.time[-1].values:
-                        last_fit_val = float(intercept + slope * ds.dDays[-1].item())
-                        ax.plot(
-                            [ds.time[-1].values, t_recover_by],
-                            [last_fit_val, args.threshold],
-                            "r--",
-                            alpha=0.5,
-                        )
-                    ax.axhline(y=args.threshold, color="gray", linestyle="--", alpha=0.5)
-                    ax.set_ylabel(args.sensor)
-                    ax.legend()
-                    ax.grid()
-
-        except (OSError, ValueError, KeyError) as e:
+            ds = prepare_dataset(fn, time_var=args.time, sensor=args.sensor)
+        except KeyError as e:
+            logging.error("%s: %s", fn, e)
+            continue
+        except (OSError, ValueError) as e:
             logging.error("Failed to process %s: %s", fn, e)
             continue
+
+        if ds.time.size < 3:
+            logging.error("Not enough data in %s (%d points, need >= 3)", fn, ds.time.size)
+            continue
+
+        data_plotted = False
+        for win_idx, (ndays, tau, start, stop) in enumerate(windows):
+            result = fit_recovery(
+                ds,
+                sensor=args.sensor,
+                threshold=args.threshold,
+                confidence=args.confidence,
+                ndays=ndays,
+                tau=tau,
+                start=start,
+                stop=stop,
+            )
+            if result is None:
+                if ndays is not None:
+                    win_str = f" (ndays={ndays})"
+                elif tau is not None:
+                    win_str = f" (\u03c4={tau})"
+                else:
+                    win_str = ""
+                logging.warning("Fit failed for %s%s", fn, win_str)
+                continue
+
+            success = True
+            r = result
+
+            if not args.json_output:
+                if multi_window:
+                    if ndays is not None:
+                        label = f"{ndays:g}d"
+                    elif tau is not None:
+                        label = f"\u03c4={tau:g}d"
+                    else:
+                        label = "full"
+                    print(f"\n{fn} [{label}]")
+                else:
+                    print(f"\n{fn}")
+                ci_i = r["intercept_ci"] if r["intercept_ci"] is not None else float("nan")
+                ci_s = r["slope_ci"] if r["slope_ci"] is not None else float("nan")
+                ci_r = r["recovery_ci_days"] if r["recovery_ci_days"] is not None else float("nan")
+                r_sq = r["r_squared"] if r["r_squared"] is not None else float("nan")
+                pv = r["pvalue"] if r["pvalue"] is not None else float("nan")
+                recover_str = str(r["recovery_date"]) + ":00"
+                print(f"Sensor:      {args.sensor}, threshold: {args.threshold}")
+                print(
+                    f"Intercept:   {r['intercept']:.4f}+-{ci_i:.4f}, "
+                    f"Slope: {r['slope']:.4f}+-{ci_s:.4f}/day ({ci_pct}%)"
+                )
+                print(f"R-squared:   {r_sq:.4f}, Pvalue: {pv:.4f}, DOF: {r['dof']:.1f}")
+                print(f"Recovery By: {recover_str}+-{ci_r:.2f} days ({ci_pct}%)")
+
+            results.append(
+                {
+                    "file": fn,
+                    "sensor": args.sensor,
+                    "threshold": args.threshold,
+                    "confidence": args.confidence,
+                    "ndays": ndays,
+                    "tau": tau,
+                    "n_points": r["n_points"],
+                    "dof": r["dof"],
+                    "intercept": r["intercept"],
+                    "intercept_ci": r["intercept_ci"],
+                    "slope": r["slope"],
+                    "slope_ci": r["slope_ci"],
+                    "r_squared": r["r_squared"],
+                    "pvalue": r["pvalue"],
+                    "recovery_date": str(r["recovery_date"]),
+                    "recovery_ci_days": r["recovery_ci_days"],
+                }
+            )
+
+            if args.plot or args.output:
+                ax = axs[index, 0]
+                plotted_indices.add(index)
+
+                if not data_plotted:
+                    # Plot raw data once per file
+                    data_plotted = True
+                    ax.set_title(f"{Path(fn).name} (n={ds.time.size})")
+                    if multi_window:
+                        ax.plot(
+                            ds.time,
+                            ds[args.sensor],
+                            ".",
+                            color="tab:blue",
+                            markersize=3,
+                            alpha=0.5,
+                            label="data",
+                            zorder=1,
+                        )
+                    else:
+                        ax.plot(
+                            ds.time,
+                            ds[args.sensor],
+                            "o",
+                            label=Path(fn).name,
+                        )
+                    ax.axhline(y=args.threshold, color="gray", linestyle="--", alpha=0.5)
+
+                slope = r["slope"]
+                intercept = r["intercept"]
+                abs_slope = abs(slope)
+                sign = "-" if slope < 0 else "+"
+
+                dof = r["dof"]
+                dof_str = f"{dof:.1f}" if dof != int(dof) else f"{int(dof)}"
+                ci_r = r["recovery_ci_days"]
+                ci_str = f"\u00b1{ci_r:.1f}d" if ci_r is not None else ""
+
+                if multi_window:
+                    color = FIT_COLORS[win_idx % len(FIT_COLORS)]
+                    if ndays is not None:
+                        win_label = f"{ndays:g}d"
+                    elif tau is not None:
+                        win_label = f"\u03c4={tau:g}d"
+                    else:
+                        win_label = "full"
+                    r_sq = r["r_squared"]
+                    r_sq_str = f" R\u00b2={r_sq:.3f}" if r_sq is not None else ""
+                    fit_label = (
+                        f"{win_label} {r['recovery_date']}{ci_str}{r_sq_str} (dof={dof_str})"
+                    )
+                else:
+                    color = "r"
+                    fit_label = (
+                        f"{r['recovery_date']}{ci_str}, "
+                        f"{intercept:.1f}{sign}{abs_slope:.2f}/day "
+                        f"(dof={dof_str})"
+                    )
+
+                time_vals = r["time"]
+                dDays = r["dDays"]
+                ax.plot(
+                    time_vals,
+                    intercept + slope * dDays,
+                    color=color,
+                    linewidth=1.5,
+                    label=fit_label,
+                    zorder=2,
+                )
+
+                # Extend fit line to recovery date
+                if r["recovery_date"] > time_vals[-1].values:
+                    last_val = float(intercept + slope * dDays[-1].item())
+                    ax.plot(
+                        [time_vals[-1].values, r["recovery_date"]],
+                        [last_val, args.threshold],
+                        color=color,
+                        linestyle="--",
+                        alpha=0.5,
+                        linewidth=1.5,
+                        zorder=2,
+                    )
+
+                ax.set_ylabel(args.sensor)
+                if multi_window:
+                    ax.legend(fontsize="x-small", loc="best")
+                else:
+                    ax.legend()
+                ax.grid(True, alpha=0.3)
 
     if args.json_output:
         print(json.dumps(results, indent=2))
@@ -286,7 +661,7 @@ def run(args: argparse.Namespace) -> int:
         if plotted_indices:
             ax = fig.axes[-1]
             ax.set_xlabel("Time (UTC)")
-            plt.title(f"{args.sensor} threshold {args.threshold}")
+            fig.suptitle(f"{args.sensor} threshold {args.threshold}")
             plt.xticks(rotation=45)
             plt.tight_layout()
             if args.output:

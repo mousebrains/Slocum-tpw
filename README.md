@@ -170,11 +170,12 @@ slocum-tpw recover-by [options] FILE [FILE ...]
 | `FILE` | One or more NetCDF files with time and battery sensor data (required) |
 | `--sensor NAME` | Sensor variable name (default: `m_lithium_battery_relative_charge`) |
 | `--threshold PCT` | Battery percentage at which recovery should happen (default: `15`) |
-| `--time NAME` | Name of time variable (default: `time`) |
+| `--time NAME` | Name of time variable (auto-detected if omitted; searches for `time`, `t`, datetime64 dtypes, CF time units, `units='timestamp'`, and names ending in `_time`) |
 | `--confidence LEVEL` | Confidence level for intervals, 0 < x < 1 (default: `0.95`) |
-| `--ndays N` | Use only the last N days of data (mutually exclusive with `--start`) |
-| `--start TIME` | Use data after this UTC time (mutually exclusive with `--ndays`) |
-| `--stop TIME` | Use data before this UTC time (cannot be combined with `--ndays`) |
+| `--ndays N` | Use only the last N days of data; use `full` for the entire dataset. Repeatable and/or comma-separated (e.g. `--ndays 3,7,full`). Cannot combine with `--start`/`--stop` |
+| `--tau T` | Exponential decay time constant in days — full dataset weighted by exp(-age/T); repeatable and/or comma-separated. Cannot combine with `--start`/`--stop` |
+| `--start TIME` | Use data after this UTC time (cannot combine with `--ndays`/`--tau`) |
+| `--stop TIME` | Use data before this UTC time (cannot combine with `--ndays`/`--tau`) |
 | `--json` | Output results as JSON instead of text |
 | `--plot` | Display an interactive matplotlib plot |
 | `--output FILE` | Save plot to file instead of displaying |
@@ -185,7 +186,11 @@ The tool fits a linear model `sensor = intercept + slope * days` to the battery
 data and solves for the day when the sensor reaches the threshold. Uncertainty
 is propagated through partial derivatives of the recovery date with respect to
 slope and intercept, using the covariance matrix from `numpy.polyfit`.
-Confidence intervals use the t-distribution with n-2 degrees of freedom.
+Confidence intervals use the t-distribution.  For unweighted fits the degrees
+of freedom are n-2; for `--tau` weighted fits the effective degrees of freedom
+are computed via Kish's formula (effective n minus 2) and the covariance matrix
+is rescaled accordingly, producing wider (more honest) intervals when old data
+is heavily downweighted.
 
 The tool handles multiple time formats (CF datetime coordinates, float epoch
 seconds), removes duplicates and NaN values, and validates that at least 3
@@ -194,13 +199,10 @@ data points are available for fitting.
 **Text output:**
 
 ```
-Sensor:            m_lithium_battery_relative_charge
-Sensor threshold:  15
-Intercept (95%):   100.0000+-0.0000
-Slope (95%, /day): -1.0000+-0.0000
-R-squared:         1.0000
-Pvalue:            0.0000
-Recovery By (95%): 2025-03-27T00:00+-0.00 (days)
+Sensor:      m_lithium_battery_relative_charge, threshold: 15
+Intercept:   100.0000+-0.0000, Slope: -1.0000+-0.0000/day (95%)
+R-squared:   1.0000, Pvalue: 0.0000, DOF: 49.0
+Recovery By: 2025-03-27T00:00+-0.00 days (95%)
 ```
 
 **JSON output** (`--json`):
@@ -211,7 +213,10 @@ Recovery By (95%): 2025-03-27T00:00+-0.00 (days)
   "sensor": "m_lithium_battery_relative_charge",
   "threshold": 15.0,
   "confidence": 0.95,
+  "ndays": null,
+  "tau": null,
   "n_points": 51,
+  "dof": 49.0,
   "intercept": 100.0,
   "intercept_ci": 0.0,
   "slope": -1.0,
@@ -231,6 +236,15 @@ slocum-tpw recover-by --threshold 15 flight.nc
 
 # Use only the last 14 days and save a plot
 slocum-tpw recover-by --ndays 14 --output battery.png flight.nc
+
+# Compare multiple time windows on one plot (use 'full' for entire dataset)
+slocum-tpw recover-by --ndays 3,7,full --plot flight.nc
+
+# Exponential downweighting (recent data weighted more)
+slocum-tpw recover-by --tau 5,15 --output battery.png flight.nc
+
+# Mix ndays windows and tau weighting
+slocum-tpw recover-by --ndays 7 --tau 10 --plot flight.nc
 
 # Process multiple gliders, output JSON
 slocum-tpw recover-by --json flt.osu684.nc flt.osu685.nc
@@ -346,9 +360,75 @@ Returns `True` on success, `False` on failure.
 
 ### `slocum_tpw.recover_by`
 
-The `recover-by` subcommand is accessed through the CLI. The `run()` function
-accepts an `argparse.Namespace` and returns an exit code (0 for success, 1 for
-failure, 2 for argument errors).
+```python
+from slocum_tpw.recover_by import prepare_dataset, fit_recovery, FIT_COLORS
+
+# Load and clean a NetCDF file (handles float epoch times, custom time vars)
+ds = prepare_dataset("flight.nc")
+ds = prepare_dataset("glider.nc", time_var="t", sensor="m_lithium_battery_relative_charge")
+
+# Fit battery decay and estimate recovery date
+result = fit_recovery(ds, threshold=15)
+print(result["recovery_date"], result["slope"])
+
+# Restrict to last 14 days
+result = fit_recovery(ds, threshold=15, ndays=14)
+
+# Exponential downweighting (recent data weighted more heavily)
+result = fit_recovery(ds, threshold=15, tau=7)
+
+# Use result arrays for custom plotting
+import matplotlib.pyplot as plt
+plt.plot(result["time"], result["sensor_values"], ".")
+plt.plot(result["time"], result["intercept"] + result["slope"] * result["dDays"])
+```
+
+#### `prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_charge") -> xr.Dataset`
+
+Load and clean a dataset for recovery fitting. *source* can be a filename,
+`pathlib.Path`, or an existing `xr.Dataset`. Handles float epoch seconds
+(auto-converted to datetime64), non-standard time variable names (renamed and
+swapped to a `time` dimension), duplicates, NaN sensor values, and sorting.
+
+When *time_var* is ``None`` (the default), the time variable is auto-detected
+by searching for: well-known names (``time``, ``t``), ``datetime64`` dtypes,
+CF time units (``"... since ..."``), ``units='timestamp'`` (Slocum POSIX
+convention), and variable names ending in ``_time``.
+
+Raises `KeyError` if required variables are missing or time cannot be
+auto-detected, `OSError` if a file path cannot be opened.
+
+#### `fit_recovery(ds, sensor=..., threshold=15, confidence=0.95, ndays=None, tau=None, start=None, stop=None) -> dict | None`
+
+Fit a linear model to battery data and extrapolate to the threshold. Returns
+`None` if the fit fails (fewer than 3 points, near-zero slope), otherwise a
+dict with:
+
+| Key | Type | Description |
+|---|---|---|
+| `time` | `xr.DataArray` | Time coordinates used in the fit |
+| `sensor_values` | `xr.DataArray` | Sensor values used |
+| `dDays` | `np.ndarray` | Days since first data point (float64) |
+| `slope`, `intercept` | `float` | Linear fit coefficients |
+| `slope_ci`, `intercept_ci` | `float \| None` | Confidence interval half-widths |
+| `recovery_date` | `np.datetime64` | Estimated recovery date (hourly resolution) |
+| `recovery_ci_days` | `float \| None` | CI half-width on recovery date (days) |
+| `r_squared`, `pvalue` | `float \| None` | Goodness-of-fit statistics |
+| `n_points` | `int` | Number of data points used |
+| `dof` | `float` | Degrees of freedom (Kish's effective n minus 2 when *tau* set, else n minus 2) |
+| `threshold`, `confidence` | `float` | Input parameters echoed back |
+| `ndays`, `tau` | `float \| None` | Window parameters echoed back |
+
+When `tau` is set, the fit uses weighted least squares with effective weight
+`exp(-age/tau)` where *age* is days from the most recent observation. R-squared
+is computed as weighted R-squared.  The covariance matrix is rescaled using
+Kish's effective sample size so that confidence intervals correctly reflect the
+reduced information content of downweighted data.
+
+#### `FIT_COLORS`
+
+List of matplotlib color names used for multi-window plots:
+`["tab:green", "tab:orange", "tab:purple", "tab:red", "tab:brown", "tab:pink"]`.
 
 ---
 
