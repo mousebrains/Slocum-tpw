@@ -370,9 +370,10 @@ Returns `True` on success, `False` on failure.
 ```python
 from slocum_tpw.recover_by import prepare_dataset, fit_recovery, FIT_COLORS
 
-# Load and clean a NetCDF file (handles float epoch times, custom time vars)
+# Load and clean a NetCDF file (default: thin bursty data to 1-hour bins)
 ds = prepare_dataset("flight.nc")
-ds = prepare_dataset("glider.nc", time_var="t", sensor="m_lithium_battery_relative_charge")
+ds = prepare_dataset("flight.nc", thin=0)   # disable thinning
+ds = prepare_dataset("flight.nc", thin=6)   # 6-hour bins
 
 # Fit battery decay and estimate recovery date
 result = fit_recovery(ds, threshold=15)
@@ -437,6 +438,12 @@ When `tau` is set, the fit uses weighted least squares with effective weight
 is computed as weighted R-squared.  The covariance matrix is rescaled using
 Kish's effective sample size so that confidence intervals correctly reflect the
 reduced information content of downweighted data.
+
+When ``_bin_stderr`` is present in the dataset (created by thinning in
+``prepare_dataset``), bin standard errors are used as inverse-variance
+precision weights (``1/stderr``) combined multiplicatively with tau weights
+when both are present.  Precision weights improve fit quality without reducing
+degrees of freedom — only tau importance weights trigger Kish's correction.
 
 #### `FIT_COLORS`
 

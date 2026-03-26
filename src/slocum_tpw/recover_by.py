@@ -248,8 +248,8 @@ def fit_recovery(
         - **r_squared**, **pvalue** (*float | None*) — goodness-of-fit stats
         - **n_points** (*int*) — number of data points used
         - **dof** (*float*) — degrees of freedom used for CIs and p-value
-          (Kish's effective n minus 2 when weights are applied via *tau*
-          and/or ``_bin_stderr`` from thinning, otherwise n minus 2)
+          (Kish's effective n minus 2 when *tau* is applied, otherwise
+          n minus 2; ``_bin_stderr`` precision weights do not reduce DOF)
         - **threshold**, **confidence** (*float*) — input parameters
         - **ndays**, **tau** (*float | None*) — window parameters
     """

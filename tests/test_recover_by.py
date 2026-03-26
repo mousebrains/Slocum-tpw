@@ -947,6 +947,108 @@ class TestParseEdgeCases:
         assert out.count("Recovery By") == 2
 
 
+class TestThinning:
+    def _make_bursty_nc(self, path, n_hours=24, points_per_burst=4):
+        """Create a NetCDF file with bursty data (multiple points per hour)."""
+        sensor = "m_lithium_battery_relative_charge"
+        times = []
+        values = []
+        base = np.datetime64("2025-01-01")
+        for h in range(n_hours):
+            base_val = 100.0 - h * 0.5  # -0.5 %/hour = -12 %/day
+            for j in range(points_per_burst):
+                times.append(base + np.timedelta64(h * 3600 + j * 100, "s"))
+                values.append(base_val - j * 0.001)  # tiny within-burst variation
+        ds = xr.Dataset(
+            {sensor: ("time", np.array(values, dtype=np.float64))},
+            coords={"time": np.array(times)},
+        )
+        ds.to_netcdf(path)
+
+    def test_thin_reduces_points(self, tmp_path):
+        """Thinning should reduce bursty data to ~1 point per hour."""
+        nc = tmp_path / "test.nc"
+        self._make_bursty_nc(nc, n_hours=24, points_per_burst=4)
+
+        ds_raw = prepare_dataset(nc, thin=0)
+        ds_thin = prepare_dataset(nc, thin=1)
+        assert ds_raw.time.size == 96  # 24 * 4
+        assert ds_thin.time.size == 24
+
+    def test_thin_creates_bin_stderr(self, tmp_path):
+        """Thinning with multi-sample bins should create _bin_stderr."""
+        nc = tmp_path / "test.nc"
+        self._make_bursty_nc(nc, n_hours=24, points_per_burst=4)
+
+        ds = prepare_dataset(nc, thin=1)
+        assert "_bin_stderr" in ds
+
+    def test_thin_disabled(self, tmp_path):
+        """thin=0 should disable thinning."""
+        nc = tmp_path / "test.nc"
+        self._make_bursty_nc(nc, n_hours=24, points_per_burst=4)
+
+        ds = prepare_dataset(nc, thin=0)
+        assert ds.time.size == 96
+        assert "_bin_stderr" not in ds
+
+    def test_thin_no_stderr_for_daily_data(self, tmp_path):
+        """Daily data (1 point per bin) should not create _bin_stderr."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc, n_days=30)
+
+        ds = prepare_dataset(nc, thin=1)
+        assert "_bin_stderr" not in ds
+
+    def test_thin_affects_dof(self, tmp_path):
+        """Thinned data should have lower dof than raw (fewer independent points)."""
+        nc = tmp_path / "test.nc"
+        self._make_bursty_nc(nc, n_hours=48, points_per_burst=5)
+
+        ds_raw = prepare_dataset(nc, thin=0)
+        ds_thin = prepare_dataset(nc, thin=1)
+        r_raw = fit_recovery(ds_raw, threshold=15)
+        r_thin = fit_recovery(ds_thin, threshold=15)
+        assert r_raw is not None and r_thin is not None
+        assert r_thin["dof"] < r_raw["dof"]
+
+    def test_thin_with_tau(self, tmp_path):
+        """Thinning combined with tau should use both weight sources."""
+        nc = tmp_path / "test.nc"
+        self._make_bursty_nc(nc, n_hours=48, points_per_burst=4)
+
+        ds = prepare_dataset(nc, thin=1)
+        r = fit_recovery(ds, threshold=15, tau=1)
+        assert r is not None
+        # tau reduces dof via Kish; n=48 hourly bins, tau=1d on 2-day span
+        assert r["dof"] < 46  # less than n-2
+
+    def test_thin_bin_stderr_weighting(self, tmp_path):
+        """Bin stderr should produce valid weights for fitting."""
+        nc = tmp_path / "test.nc"
+        self._make_bursty_nc(nc, n_hours=48, points_per_burst=5)
+
+        ds_thin = prepare_dataset(nc, thin=1)
+        assert "_bin_stderr" in ds_thin
+        stderr = ds_thin["_bin_stderr"].values
+        # All stderr values should be finite and positive
+        assert np.all(np.isfinite(stderr))
+        assert np.all(stderr > 0)
+        # Fit with bin weights should succeed
+        r = fit_recovery(ds_thin, threshold=15)
+        assert r is not None
+
+    def test_cli_thin_zero_disables(self, tmp_path, capsys):
+        """--thin 0 via CLI should disable thinning."""
+        nc = tmp_path / "test.nc"
+        self._make_bursty_nc(nc, n_hours=24, points_per_burst=4)
+
+        rc = _run(["--thin", "0", "--threshold", "15", str(nc)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Recovery By" in out
+
+
 class TestMainModule:
     def test_python_m_version(self):
         """python -m slocum_tpw --version should work."""

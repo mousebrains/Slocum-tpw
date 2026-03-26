@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `--thin` for thinning bursty data to bin means with within-bin stderr as
+  inverse-variance fit weights (default: 1 hour, `--thin 0` to disable)
+- Precision vs importance weight distinction: Kish's DOF correction applies
+  only to `--tau` importance weights, not bin-stderr precision weights
+- Python 3.14 added to CI test matrix and PyPI classifiers
+
+### Changed
+- `codecov-action` updated from v5 to v6 (Node.js 24)
+
 ## [0.1.4] - 2026-03-26
 
 ### Added
