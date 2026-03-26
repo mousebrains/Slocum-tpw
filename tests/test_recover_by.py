@@ -331,6 +331,105 @@ class TestPrepareDataset:
         result = prepare_dataset(nc)
         assert result.time.size == 8
 
+    def test_auto_detect_time_coord(self, tmp_path):
+        """Auto-detect should find 'time' as a coordinate."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        ds = prepare_dataset(nc, time_var=None)
+        assert "time" in ds.dims
+        assert ds.time.size == 51
+
+    def test_auto_detect_t_variable(self, tmp_path):
+        """Auto-detect should find 't' by name."""
+        nc = tmp_path / "test.nc"
+        times = np.datetime64("2025-01-01") + np.arange(20).astype("timedelta64[D]")
+        battery = np.linspace(100, 80, 20)
+        ds = xr.Dataset(
+            {
+                "t": ("index", times),
+                "m_lithium_battery_relative_charge": ("index", battery),
+            }
+        )
+        ds.to_netcdf(nc)
+
+        result = prepare_dataset(nc, time_var=None)
+        assert "time" in result.dims
+        assert result.time.size == 20
+
+    def test_auto_detect_posix_timestamp_units(self, tmp_path):
+        """Auto-detect should find a float variable with units='timestamp'."""
+        nc = tmp_path / "test.nc"
+        epoch_start = int(
+            (np.datetime64("2025-01-01") - np.datetime64("1970-01-01")) / np.timedelta64(1, "s")
+        )
+        posix_times = epoch_start + np.arange(20, dtype=np.float64) * 86400
+        battery = np.linspace(100, 80, 20)
+        ds = xr.Dataset(
+            {
+                "m_present_time": ("i", posix_times),
+                "m_lithium_battery_relative_charge": ("i", battery),
+            }
+        )
+        ds["m_present_time"].attrs["units"] = "timestamp"
+        ds.to_netcdf(nc)
+
+        result = prepare_dataset(nc, time_var=None)
+        assert "time" in result.dims
+        assert result.time.size == 20
+
+    def test_auto_detect_cf_units(self, tmp_path):
+        """Auto-detect should find a variable with CF time units."""
+        nc = tmp_path / "test.nc"
+        seconds = np.arange(20, dtype=np.float64) * 86400
+        battery = np.linspace(100, 80, 20)
+        ds = xr.Dataset(
+            {
+                "obs_time": ("row", seconds),
+                "m_lithium_battery_relative_charge": ("row", battery),
+            }
+        )
+        ds["obs_time"].attrs["units"] = "seconds since 2025-01-01"
+        ds.to_netcdf(nc)
+
+        result = prepare_dataset(nc, time_var=None)
+        assert "time" in result.dims
+        assert result.time.size == 20
+
+    def test_auto_detect_name_ends_with_time(self, tmp_path):
+        """Auto-detect should find a variable whose name ends with _time."""
+        nc = tmp_path / "test.nc"
+        epoch_start = int(
+            (np.datetime64("2025-01-01") - np.datetime64("1970-01-01")) / np.timedelta64(1, "s")
+        )
+        posix_times = epoch_start + np.arange(20, dtype=np.float64) * 86400
+        battery = np.linspace(100, 80, 20)
+        ds = xr.Dataset(
+            {
+                "sci_m_present_time": ("row", posix_times),
+                "m_lithium_battery_relative_charge": ("row", battery),
+            }
+        )
+        ds.to_netcdf(nc)
+
+        result = prepare_dataset(nc, time_var=None)
+        assert "time" in result.dims
+        assert result.time.size == 20
+
+    def test_auto_detect_no_time_raises(self, tmp_path):
+        """Auto-detect should raise KeyError when no time variable is found."""
+        nc = tmp_path / "test.nc"
+        ds = xr.Dataset(
+            {
+                "voltage": ("row", np.linspace(100, 80, 20)),
+                "m_lithium_battery_relative_charge": ("row", np.linspace(100, 80, 20)),
+            }
+        )
+        ds.to_netcdf(nc)
+
+        with pytest.raises(KeyError, match="Cannot auto-detect"):
+            prepare_dataset(nc, time_var=None)
+
 
 class TestFitRecovery:
     def _make_ds(self, n_days=51, batt_start=100.0, batt_end=50.0):

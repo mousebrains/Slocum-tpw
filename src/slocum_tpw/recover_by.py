@@ -29,15 +29,75 @@ def _safe_sqrt(x):
     return float(np.sqrt(max(0, x)))
 
 
-def prepare_dataset(source, time_var="time", sensor="m_lithium_battery_relative_charge"):
+def _find_time_var(ds, sensor):
+    """Auto-detect the time variable in a dataset.
+
+    Search order:
+
+    1. ``"time"`` or ``"t"`` by exact name
+    2. Any variable with ``datetime64`` dtype
+    3. Any variable with CF time units (``"... since ..."`` in ``units`` attr)
+    4. Any variable with ``units='timestamp'``
+    5. Any variable on the sensor's dimension whose name ends with ``_time``
+
+    Returns the variable name, or raises KeyError if none found.
+    """
+    all_names = set(ds.data_vars) | set(ds.coords)
+
+    # 1. Well-known names
+    for name in ("time", "t"):
+        if name in all_names:
+            return name
+
+    # Restrict candidates to the sensor's dimension when possible
+    sensor_dims = set(ds[sensor].dims) if sensor in ds else set()
+
+    def _on_sensor_dim(name):
+        if not sensor_dims:
+            return True
+        return bool(set(ds[name].dims) & sensor_dims)
+
+    # 2. datetime64 dtype
+    for name in all_names:
+        if ds[name].dtype.kind == "M" and _on_sensor_dim(name):
+            return name
+
+    # 3. CF time units ("... since ...")
+    for name in all_names:
+        units = ds[name].attrs.get("units", "")
+        if isinstance(units, str) and " since " in units and _on_sensor_dim(name):
+            return name
+
+    # 4. units='timestamp' (Slocum convention for POSIX float times)
+    for name in all_names:
+        units = ds[name].attrs.get("units", "")
+        if isinstance(units, str) and units.lower() == "timestamp" and _on_sensor_dim(name):
+            return name
+
+    # 5. Name ends with _time, on the sensor's dimension
+    for name in all_names:
+        if name.endswith("_time") and _on_sensor_dim(name):
+            return name
+
+    raise KeyError(
+        f"Cannot auto-detect time variable in dataset "
+        f"(variables: {sorted(all_names)}). Use time_var to specify it."
+    )
+
+
+def prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_charge"):
     """Load and clean a dataset for recovery fitting.
 
     Parameters
     ----------
     source : str, Path, or xr.Dataset
         NetCDF filename or an already-opened Dataset.
-    time_var : str
-        Name of the time variable in the dataset.
+    time_var : str or None
+        Name of the time variable.  When ``None`` (the default), the
+        variable is auto-detected by searching for well-known names
+        (``time``, ``t``), datetime64 dtypes, CF time units, and
+        Slocum conventions (``units='timestamp'``, names ending in
+        ``_time``).
     sensor : str
         Name of the battery sensor variable.
 
@@ -50,7 +110,8 @@ def prepare_dataset(source, time_var="time", sensor="m_lithium_battery_relative_
     Raises
     ------
     KeyError
-        If required variables are not found in the dataset.
+        If required variables are not found in the dataset, or the time
+        variable cannot be auto-detected.
     OSError
         If *source* is a path and the file cannot be opened.
     """
@@ -59,9 +120,15 @@ def prepare_dataset(source, time_var="time", sensor="m_lithium_battery_relative_
     else:
         ds = source.copy()
 
-    for name in (time_var, sensor):
-        if name not in ds:
-            raise KeyError(f"Variable '{name}' not found in dataset")
+    if sensor not in ds:
+        raise KeyError(f"Variable '{sensor}' not found in dataset")
+
+    if time_var is None:
+        time_var = _find_time_var(ds, sensor)
+        logging.debug("Auto-detected time variable: %s", time_var)
+
+    if time_var not in ds:
+        raise KeyError(f"Variable '{time_var}' not found in dataset")
 
     ds = ds.drop_vars(set(ds) - {time_var, sensor})
 
@@ -315,7 +382,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         default=15,
         help="Battery percentage at which recovery should happen",
     )
-    parser.add_argument("--time", type=str, default="time", help="Name of time variable")
+    parser.add_argument(
+        "--time",
+        type=str,
+        default=None,
+        help="Name of time variable (auto-detected if omitted)",
+    )
     parser.add_argument(
         "--confidence",
         type=float,

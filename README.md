@@ -170,7 +170,7 @@ slocum-tpw recover-by [options] FILE [FILE ...]
 | `FILE` | One or more NetCDF files with time and battery sensor data (required) |
 | `--sensor NAME` | Sensor variable name (default: `m_lithium_battery_relative_charge`) |
 | `--threshold PCT` | Battery percentage at which recovery should happen (default: `15`) |
-| `--time NAME` | Name of time variable (default: `time`) |
+| `--time NAME` | Name of time variable (auto-detected if omitted; searches for `time`, `t`, datetime64 dtypes, CF time units, `units='timestamp'`, and names ending in `_time`) |
 | `--confidence LEVEL` | Confidence level for intervals, 0 < x < 1 (default: `0.95`) |
 | `--ndays N` | Use only the last N days of data; use `full` for the entire dataset. Repeatable and/or comma-separated (e.g. `--ndays 3,7,full`). Cannot combine with `--start`/`--stop` |
 | `--tau T` | Exponential decay time constant in days — full dataset weighted by exp(-age/T); repeatable and/or comma-separated. Cannot combine with `--start`/`--stop` |
@@ -381,15 +381,20 @@ plt.plot(result["time"], result["sensor_values"], ".")
 plt.plot(result["time"], result["intercept"] + result["slope"] * result["dDays"])
 ```
 
-#### `prepare_dataset(source, time_var="time", sensor="m_lithium_battery_relative_charge") -> xr.Dataset`
+#### `prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_charge") -> xr.Dataset`
 
 Load and clean a dataset for recovery fitting. *source* can be a filename,
 `pathlib.Path`, or an existing `xr.Dataset`. Handles float epoch seconds
 (auto-converted to datetime64), non-standard time variable names (renamed and
 swapped to a `time` dimension), duplicates, NaN sensor values, and sorting.
 
-Raises `KeyError` if required variables are missing, `OSError` if a file path
-cannot be opened.
+When *time_var* is ``None`` (the default), the time variable is auto-detected
+by searching for: well-known names (``time``, ``t``), ``datetime64`` dtypes,
+CF time units (``"... since ..."``), ``units='timestamp'`` (Slocum POSIX
+convention), and variable names ending in ``_time``.
+
+Raises `KeyError` if required variables are missing or time cannot be
+auto-detected, `OSError` if a file path cannot be opened.
 
 #### `fit_recovery(ds, sensor=..., threshold=15, confidence=0.95, ndays=None, tau=None, start=None, stop=None) -> dict | None`
 
