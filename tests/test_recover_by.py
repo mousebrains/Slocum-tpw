@@ -607,3 +607,68 @@ class TestTau:
 
         rc = _run(["--tau", "5", "--stop", "2025-02-01", str(nc)])
         assert rc == 2
+
+
+class TestInputValidation:
+    def test_ndays_non_numeric(self, tmp_path):
+        """--ndays with non-numeric value should be rejected."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        rc = _run(["--ndays", "abc", str(nc)])
+        assert rc == 2
+
+    def test_tau_non_numeric(self, tmp_path):
+        """--tau with non-numeric value should be rejected."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        rc = _run(["--tau", "xyz", str(nc)])
+        assert rc == 2
+
+    def test_ndays_zero(self, tmp_path):
+        """--ndays 0 should be rejected."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        rc = _run(["--ndays", "0", str(nc)])
+        assert rc == 2
+
+    def test_ndays_negative(self, tmp_path):
+        """--ndays with negative value should be rejected."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        rc = _run(["--ndays", "-5", str(nc)])
+        assert rc == 2
+
+    def test_tau_zero(self, tmp_path):
+        """--tau 0 should be rejected."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        rc = _run(["--tau", "0", str(nc)])
+        assert rc == 2
+
+    def test_tau_negative(self, tmp_path):
+        """--tau with negative value should be rejected."""
+        nc = tmp_path / "test.nc"
+        make_linear_nc(nc)
+
+        rc = _run(["--tau", "-3", str(nc)])
+        assert rc == 2
+
+
+class TestPlotEdgeCases:
+    def test_first_window_fails_still_plots_data(self, tmp_path):
+        """If the first ndays window has too few points, raw data should
+        still be plotted when a later window succeeds."""
+        nc = tmp_path / "test.nc"
+        # 10 days of data: ndays=1 gives 2 points (fails), ndays=7 succeeds
+        make_linear_nc(nc, n_days=10)
+        plot_path = tmp_path / "plot.png"
+
+        rc = _run(["--ndays", "1,7", "--output", str(plot_path), str(nc)])
+        assert rc == 0
+        assert plot_path.exists()
+        assert plot_path.stat().st_size > 0

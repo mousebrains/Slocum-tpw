@@ -51,6 +51,8 @@ def prepare_dataset(source, time_var="time", sensor="m_lithium_battery_relative_
     ------
     KeyError
         If required variables are not found in the dataset.
+    OSError
+        If *source* is a path and the file cannot be opened.
     """
     if isinstance(source, (str, Path)):
         ds = xr.open_dataset(source)
@@ -127,10 +129,21 @@ def fit_recovery(
     Returns
     -------
     dict or None
-        Fit results dict with keys: time, sensor_values, dDays, slope,
-        intercept, slope_ci, intercept_ci, recovery_date, recovery_ci_days,
-        r_squared, pvalue, n_points, threshold, confidence, ndays, tau.
         Returns None if the fit fails (insufficient data or near-zero slope).
+        On success, a dict with:
+
+        - **time** (*xr.DataArray*) — time coordinates used in the fit
+        - **sensor_values** (*xr.DataArray*) — sensor values used
+        - **dDays** (*np.ndarray, float64*) — days since first data point
+        - **slope**, **intercept** (*float*) — linear fit coefficients
+        - **slope_ci**, **intercept_ci** (*float | None*) — CI half-widths
+        - **recovery_date** (*np.datetime64*) — estimated recovery date
+          (hourly resolution)
+        - **recovery_ci_days** (*float | None*) — CI half-width in days
+        - **r_squared**, **pvalue** (*float | None*) — goodness-of-fit stats
+        - **n_points** (*int*) — number of data points used
+        - **threshold**, **confidence** (*float*) — input parameters
+        - **ndays**, **tau** (*float | None*) — window parameters
     """
     if ndays is not None:
         etime = ds.time[-1]
@@ -309,8 +322,19 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace) -> int:
     """Execute the recover-by command."""
-    ndays_list = _parse_float_list(args.ndays)
-    tau_list = _parse_float_list(args.tau)
+    try:
+        ndays_list = _parse_float_list(args.ndays)
+        tau_list = _parse_float_list(args.tau)
+    except ValueError as e:
+        logging.error("Invalid numeric value for --ndays/--tau: %s", e)
+        return 2
+
+    if ndays_list is not None and any(n <= 0 for n in ndays_list):
+        logging.error("--ndays values must be positive")
+        return 2
+    if tau_list is not None and any(v <= 0 for v in tau_list):
+        logging.error("--tau values must be positive")
+        return 2
 
     has_windows = ndays_list is not None or tau_list is not None
     if has_windows and args.start is not None:
@@ -364,6 +388,7 @@ def run(args: argparse.Namespace) -> int:
             logging.error("Not enough data in %s (%d points, need >= 3)", fn, ds.time.size)
             continue
 
+        data_plotted = False
         for win_idx, (ndays, tau, start, stop) in enumerate(windows):
             result = fit_recovery(
                 ds,
@@ -437,8 +462,9 @@ def run(args: argparse.Namespace) -> int:
                 ax = axs[index, 0]
                 plotted_indices.add(index)
 
-                if win_idx == 0:
+                if not data_plotted:
                     # Plot raw data once per file
+                    data_plotted = True
                     if multi_window:
                         ax.plot(
                             ds.time,
