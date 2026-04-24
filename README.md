@@ -626,12 +626,14 @@ negative means vacuum is increasing (gas leaking out); `0` is no leak.
 Write a three-column CSV with header `m_present_time,m_vacuum,m_veh_temp`
 and values rounded to 3, 6, and 4 decimal places respectively.
 
-#### `vdw_pressure(rho, T) -> float` / `vdw_density(P, T) -> float`
+#### `vdw_pressure(rho, T) -> float` / `vdw_density(P, T) -> float` / `vdw_density_vec(P, T) -> np.ndarray`
 
 Forward and inverse van der Waals EOS for air (constants `A_VDW = 0.1358`
 Pa·m⁶/mol², `B_VDW = 3.64e-5` m³/mol).  `vdw_density` solves the forward
 relation for molar density via `scipy.optimize.brentq` and is accurate to
-double precision.
+double precision.  `vdw_density_vec` is a vectorized Newton-method version
+used by `analyze-leak` for ~100× speedup on bulk arrays; entries that fail
+to converge are returned as `NaN`.
 
 ---
 

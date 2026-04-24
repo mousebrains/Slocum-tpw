@@ -45,6 +45,34 @@ def vdw_density(P, T):
     )
 
 
+def vdw_density_vec(P, T, max_iter=30, tol=1e-12):
+    """Vectorized inverse vdW: rho (mol/m^3) given absolute P (Pa) and T (K) arrays.
+
+    Newton's method on the gas-phase root with the ideal-gas density as the
+    initial guess.  Converges to double precision in ~10 iterations for
+    typical Slocum operating conditions (T near 290 K, vacuum 5-15 inHg).
+    Entries whose Newton residual exceeds 1 ppm of P are returned as NaN.
+    """
+    P = np.asarray(P, dtype=float)
+    T = np.asarray(T, dtype=float)
+    rho = P / (R * T)  # ideal gas initial guess
+    RT = R * T
+    for _ in range(max_iter):
+        one_minus_rB = 1.0 - rho * B_VDW
+        f = rho * RT / one_minus_rB - A_VDW * rho * rho - P
+        fp = RT / (one_minus_rB * one_minus_rB) - 2.0 * A_VDW * rho
+        delta = f / fp
+        rho = rho - delta
+        if np.all(np.abs(delta) <= tol * np.abs(rho)):
+            break
+    # Mask any entries that failed to converge
+    residual = vdw_pressure(rho, T) - P
+    bad = ~np.isfinite(rho) | (np.abs(residual) > 1e-6 * np.abs(P))
+    if np.any(bad):
+        rho = np.where(bad, np.nan, rho)
+    return rho
+
+
 def simulate(
     days: float,
     timestep: float,
@@ -122,26 +150,35 @@ def write_csv(path: str, time_s, vacuum_inHg, temperature_c) -> None:
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["m_present_time", "m_vacuum", "m_veh_temp"])
-        for ti, vi, Ti in zip(time_s, vacuum_inHg, temperature_c):
+        for ti, vi, Ti in zip(time_s, vacuum_inHg, temperature_c, strict=True):
             w.writerow([f"{ti:.3f}", f"{vi:.6f}", f"{Ti:.4f}"])
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Add simulate-leak arguments to the parser."""
     parser.add_argument(
-        "-o", "--output", type=str, default="simulated.csv",
+        "-o",
+        "--output",
+        type=str,
+        default="simulated.csv",
         help="Output CSV path (default: simulated.csv)",
     )
     parser.add_argument(
-        "--days", type=float, default=4.0,
+        "--days",
+        type=float,
+        default=4.0,
         help="Simulation duration in days (default: 4)",
     )
     parser.add_argument(
-        "--timestep", type=float, default=3.0,
+        "--timestep",
+        type=float,
+        default=3.0,
         help="Sampling interval in seconds (default: 3)",
     )
     parser.add_argument(
-        "--vacuum-drop-per-day", type=float, default=0.0,
+        "--vacuum-drop-per-day",
+        type=float,
+        default=0.0,
         help=(
             "Signed leak rate in inHg/day of vacuum DROP.  Positive = vacuum "
             "decreasing (gas leaking IN).  Negative = vacuum increasing (gas "
@@ -149,39 +186,57 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--sigma-pressure", type=float, default=0.001,
+        "--sigma-pressure",
+        type=float,
+        default=0.001,
         help="1-sigma Gaussian noise on vacuum, inHg (default: 0.001)",
     )
     parser.add_argument(
-        "--sigma-temp", type=float, default=0.1,
+        "--sigma-temp",
+        type=float,
+        default=0.1,
         help="1-sigma Gaussian noise on temperature, degC (default: 0.1)",
     )
     parser.add_argument(
-        "--initial-vacuum", type=float, default=10.0,
+        "--initial-vacuum",
+        type=float,
+        default=10.0,
         help="Initial vacuum at t=0, inHg (default: 10)",
     )
     parser.add_argument(
-        "--volume", type=float, default=50.0,
+        "--volume",
+        type=float,
+        default=50.0,
         help="Sealed gas volume, liters (default: 50)",
     )
     parser.add_argument(
-        "--temp-mean", type=float, default=17.5,
+        "--temp-mean",
+        type=float,
+        default=17.5,
         help="Mean air temperature, degC (default: 17.5)",
     )
     parser.add_argument(
-        "--temp-amplitude", type=float, default=2.5,
+        "--temp-amplitude",
+        type=float,
+        default=2.5,
         help="Thermal amplitude, degC (default: 2.5)",
     )
     parser.add_argument(
-        "--temp-period-hours", type=float, default=24.0,
+        "--temp-period-hours",
+        type=float,
+        default=24.0,
         help="Thermal cycle period, hours (default: 24)",
     )
     parser.add_argument(
-        "--seed", type=int, default=None,
+        "--seed",
+        type=int,
+        default=None,
         help="RNG seed for reproducibility (default: random)",
     )
     parser.add_argument(
-        "--t0-epoch", type=float, default=0.0,
+        "--t0-epoch",
+        type=float,
+        default=0.0,
         help=(
             "Seconds at t=0 (default: 0); set to a Unix epoch time to get "
             "absolute timestamps in the output CSV."
@@ -210,9 +265,13 @@ def run(args: argparse.Namespace) -> int:
     n = result["time"].size
     total_drop = args.vacuum_drop_per_day * args.days
     logging.info(
-        "wrote %d rows to %s (days=%.4f dt=%.3fs drop=%+.4f inHg "
-        "truth d(n/V)/dt=%+.4e mol/m^3/s)",
-        n, args.output, args.days, args.timestep, total_drop, result["drho_dt_true"],
+        "wrote %d rows to %s (days=%.4f dt=%.3fs drop=%+.4f inHg truth d(n/V)/dt=%+.4e mol/m^3/s)",
+        n,
+        args.output,
+        args.days,
+        args.timestep,
+        total_drop,
+        result["drho_dt_true"],
     )
     print(f"Wrote {n} rows to {args.output}")
     print(f"  duration            : {args.days:.4f} days")

@@ -62,7 +62,7 @@ def proc_file(fn: str) -> pd.DataFrame | None:
                     int(matches["hour"]),
                     int(matches["minute"]),
                     int(matches["second"]),
-                    tzinfo=datetime.timezone.utc,
+                    tzinfo=datetime.UTC,
                 )
             except ValueError:
                 continue

@@ -59,24 +59,24 @@ def _find_time_var(ds, sensor):
         return bool(set(ds[name].dims) & sensor_dims)
 
     # 2. datetime64 dtype
-    for name in all_names:
+    for name in sorted(all_names):
         if ds[name].dtype.kind == "M" and _on_sensor_dim(name):
             return name
 
     # 3. CF time units ("... since ...")
-    for name in all_names:
+    for name in sorted(all_names):
         units = ds[name].attrs.get("units", "")
         if isinstance(units, str) and " since " in units and _on_sensor_dim(name):
             return name
 
     # 4. units='timestamp' (Slocum convention for POSIX float times)
-    for name in all_names:
+    for name in sorted(all_names):
         units = ds[name].attrs.get("units", "")
         if isinstance(units, str) and units.lower() == "timestamp" and _on_sensor_dim(name):
             return name
 
     # 5. Name ends with _time, on the sensor's dimension
-    for name in all_names:
+    for name in sorted(all_names):
         if name.endswith("_time") and _on_sensor_dim(name):
             return name
 
@@ -124,10 +124,7 @@ def prepare_dataset(source, time_var=None, sensor="m_lithium_battery_relative_ch
     OSError
         If *source* is a path and the file cannot be opened.
     """
-    if isinstance(source, (str, Path)):
-        ds = xr.open_dataset(source)
-    else:
-        ds = source.copy()
+    ds = xr.open_dataset(source) if isinstance(source, (str, Path)) else source.copy()
 
     if sensor not in ds:
         raise KeyError(f"Variable '{sensor}' not found in dataset")
@@ -347,10 +344,7 @@ def fit_recovery(
     else:
         ss_res = np.sum((ds[sensor] - y_pred) ** 2).item()
         ss_tot = np.sum((ds[sensor] - ds[sensor].mean()) ** 2).item()
-    if ss_tot == 0:
-        r_squared = float("nan")
-    else:
-        r_squared = 1 - ss_res / ss_tot
+    r_squared = float("nan") if ss_tot == 0 else 1 - ss_res / ss_tot
 
     # p-value for slope
     if sigma_slope > 0:

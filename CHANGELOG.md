@@ -18,8 +18,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sample and least-squares fitting the inferred molar density vs. time.
   Column names are overridable so it can be run on real glider CSV exports.
 - Public APIs `slocum_tpw.simulate_leak` (`simulate()`, `write_csv()`,
-  `vdw_pressure()`, `vdw_density()`) and `slocum_tpw.analyze_leak`
-  (`load_csv()`, `fit_leak_rate()`).
+  `vdw_pressure()`, `vdw_density()`, `vdw_density_vec()`) and
+  `slocum_tpw.analyze_leak` (`load_csv()`, `fit_leak_rate()`).
+- `vdw_density_vec()`: Newton-method vectorized inverse van der Waals — used
+  internally by `analyze-leak` for ~100× speedup over the per-sample
+  `brentq` loop on typical 100K-row CSV exports.
+
+### Changed
+- `cli`: subcommand modules are now imported lazily — top-level `--help`
+  no longer pulls in matplotlib / scipy / gsw, dropping cold-start latency
+  by an order of magnitude.
+- `log-harvest`: combined existing+new appends are now sorted by time
+  before writing, giving downstream tools a stable contract.
+- `mk-combined`: `dropna` subset is named explicitly (was column-position
+  dependent) and the `lat`/`lon` attribute dicts are no longer aliased
+  (latent shared-mutation bug).
+- `recover-by`: `_find_time_var` candidates are sorted before scanning so
+  auto-detection is deterministic across runs.
+- ruff lint rules now include `B`, `UP`, `SIM`, `RUF`; CI and pre-commit
+  pinned ruff updated to 0.15.11.
+
+### Fixed
+- `mk-combined`: NumPy 2.0 deprecation — `datetime64 → float` cast now goes
+  via `int64`.
+- `log-harvest`: non-UTF-8 lines now emit a debug log before being skipped
+  (previously silent).
 
 ## [0.1.5] - 2026-03-26
 

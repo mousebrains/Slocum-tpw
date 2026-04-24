@@ -24,7 +24,7 @@ def make_linear_nc(path, start="2025-01-01", n_days=51, batt_start=100.0, batt_e
 def _run(argv):
     """Run CLI and return exit code."""
     with pytest.raises(SystemExit) as exc_info:
-        main(["recover-by"] + argv)
+        main(["recover-by", *argv])
     return exc_info.value.code
 
 

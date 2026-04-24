@@ -37,12 +37,19 @@ class TestFit:
         r = simulate(days=0.2, timestep=10.0, seed=21)
         fit = fit_leak_rate(r["time"], r["vacuum_inHg"], r["temperature_c"])
         required = {
-            "slope", "slope_stderr", "slope_95ci",
-            "slope_per_day", "slope_stderr_per_day",
-            "intercept", "intercept_stderr",
-            "sigma_rho", "z_score",
-            "n_points", "time_span_s",
-            "time", "rho",
+            "slope",
+            "slope_stderr",
+            "slope_95ci",
+            "slope_per_day",
+            "slope_stderr_per_day",
+            "intercept",
+            "intercept_stderr",
+            "sigma_rho",
+            "z_score",
+            "n_points",
+            "time_span_s",
+            "time",
+            "rho",
         }
         assert required.issubset(fit.keys())
 
@@ -69,13 +76,8 @@ class TestLoadCsv:
 
     def test_column_override(self, tmp_path):
         fn = tmp_path / "obs.csv"
-        fn.write_text(
-            "timestamp,vac_inHg,temp_C\n"
-            "0.0,10.0,20.0\n"
-            "3.0,10.001,20.0\n"
-            "6.0,9.999,20.0\n"
-        )
-        t, v, T = load_csv(
+        fn.write_text("timestamp,vac_inHg,temp_C\n0.0,10.0,20.0\n3.0,10.001,20.0\n6.0,9.999,20.0\n")
+        t, _v, _T = load_csv(
             str(fn), time_col="timestamp", vacuum_col="vac_inHg", temp_col="temp_C"
         )
         assert t.size == 3
@@ -96,17 +98,14 @@ class TestLoadCsv:
             "3.0,garbage,20.0\n"
             "6.0,10.0,20.0\n"
         )
-        t, v, T = load_csv(str(fn))
+        t, _v, _T = load_csv(str(fn))
         assert t.size == 2
         np.testing.assert_allclose(t, [0.0, 6.0])
 
     def test_unsorted_input_is_sorted(self, tmp_path):
         fn = tmp_path / "obs.csv"
         fn.write_text(
-            "m_present_time,m_vacuum,m_veh_temp\n"
-            "6.0,10.0,20.0\n"
-            "0.0,10.0,20.0\n"
-            "3.0,10.0,20.0\n"
+            "m_present_time,m_vacuum,m_veh_temp\n6.0,10.0,20.0\n0.0,10.0,20.0\n3.0,10.0,20.0\n"
         )
         t, _, _ = load_csv(str(fn))
         np.testing.assert_allclose(t, [0.0, 3.0, 6.0])
@@ -116,7 +115,10 @@ class TestEndToEnd:
     def test_csv_pipeline_recovers_leak(self, tmp_path):
         """simulate -> write_csv -> load_csv -> fit_leak_rate: recover truth."""
         r = simulate(
-            days=2.0, timestep=6.0, vacuum_drop_per_day=0.05, seed=29,
+            days=2.0,
+            timestep=6.0,
+            vacuum_drop_per_day=0.05,
+            seed=29,
         )
         fn = tmp_path / "pipeline.csv"
         write_csv(str(fn), r["time"], r["vacuum_inHg"], r["temperature_c"])

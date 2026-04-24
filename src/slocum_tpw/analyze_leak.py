@@ -20,7 +20,7 @@ import logging
 import numpy as np
 from scipy import stats
 
-from slocum_tpw.simulate_leak import INHG_TO_PA, P_ATM_PA, vdw_density
+from slocum_tpw.simulate_leak import INHG_TO_PA, P_ATM_PA, vdw_density_vec
 
 
 def load_csv(
@@ -48,9 +48,7 @@ def load_csv(
             raise ValueError(f"{path}: empty or unreadable CSV")
         missing = [c for c in (time_col, vacuum_col, temp_col) if c not in reader.fieldnames]
         if missing:
-            raise KeyError(
-                f"{path}: missing column(s) {missing}; available {reader.fieldnames}"
-            )
+            raise KeyError(f"{path}: missing column(s) {missing}; available {reader.fieldnames}")
         for row in reader:
             try:
                 ti = float(row[time_col])
@@ -114,18 +112,12 @@ def fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict:
     P_abs_Pa = P_ATM_PA - vacuum_inHg * INHG_TO_PA
     T_K = temperature_c + 273.15
 
-    rho = np.empty_like(time_s)
-    bad = 0
-    for i in range(time_s.size):
-        try:
-            rho[i] = vdw_density(P_abs_Pa[i], T_K[i])
-        except (ValueError, RuntimeError):
-            rho[i] = np.nan
-            bad += 1
+    rho = vdw_density_vec(P_abs_Pa, T_K)
+    good = np.isfinite(rho)
+    bad = int((~good).sum())
     if bad:
         logging.warning("%d row(s) failed vdW inversion; dropped from fit", bad)
 
-    good = np.isfinite(rho)
     t_g = time_s[good]
     rho_g = rho[good]
     if t_g.size < 3:
@@ -157,19 +149,28 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Add analyze-leak arguments to the parser."""
     parser.add_argument("csv_file", type=str, help="Path to input CSV")
     parser.add_argument(
-        "--time-col", type=str, default="m_present_time",
+        "--time-col",
+        type=str,
+        default="m_present_time",
         help="Time column name, seconds (default: m_present_time)",
     )
     parser.add_argument(
-        "--vacuum-col", type=str, default="m_vacuum",
+        "--vacuum-col",
+        type=str,
+        default="m_vacuum",
         help="Vacuum column name, inHg (default: m_vacuum)",
     )
     parser.add_argument(
-        "--temp-col", type=str, default="m_veh_temp",
+        "--temp-col",
+        type=str,
+        default="m_veh_temp",
         help="Temperature column name, degC (default: m_veh_temp)",
     )
     parser.add_argument(
-        "--plot", type=str, default=None, metavar="PATH",
+        "--plot",
+        type=str,
+        default=None,
+        metavar="PATH",
         help="Save a fit diagnostic plot to PATH (default: no plot)",
     )
 
@@ -203,10 +204,7 @@ def run(args: argparse.Namespace) -> int:
         f"time span           : {result['time_span_s']:.1f} s "
         f"({result['time_span_s'] / 86400.0:.4f} days)"
     )
-    print(
-        f"rho range           : {result['rho'].min():.4f} .. "
-        f"{result['rho'].max():.4f} mol/m^3"
-    )
+    print(f"rho range           : {result['rho'].min():.4f} .. {result['rho'].max():.4f} mol/m^3")
     print(f"residual sigma(rho) : {result['sigma_rho']:.4e} mol/m^3")
     print()
     print("Linear fit: rho(t) = intercept + slope * t")
@@ -219,10 +217,7 @@ def run(args: argparse.Namespace) -> int:
     print()
     print(f"  intercept          = {result['intercept']:.6f} mol/m^3")
     print(f"  intercept 1-sigma  = {result['intercept_stderr']:.4e} mol/m^3")
-    print(
-        f"  slope / sigma      = {result['z_score']:+.2f}  "
-        "(|z| > ~3 suggests a real trend)"
-    )
+    print(f"  slope / sigma      = {result['z_score']:+.2f}  (|z| > ~3 suggests a real trend)")
 
     if args.plot is not None:
         import matplotlib
@@ -236,15 +231,21 @@ def run(args: argparse.Namespace) -> int:
         rho_fit = result["intercept"] + result["slope"] * t_g
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(
-            (t_g - t_g[0]) / 3600.0, rho_g - rho0,
-            ".", ms=0.5, alpha=0.3, label="inferred n/V - rho[0]",
+            (t_g - t_g[0]) / 3600.0,
+            rho_g - rho0,
+            ".",
+            ms=0.5,
+            alpha=0.3,
+            label="inferred n/V - rho[0]",
         )
         ax.plot(
-            (t_g - t_g[0]) / 3600.0, rho_fit - rho0,
-            "-", color="C1", lw=1.4,
+            (t_g - t_g[0]) / 3600.0,
+            rho_fit - rho0,
+            "-",
+            color="C1",
+            lw=1.4,
             label=(
-                f"fit: slope = {result['slope']:+.3e}"
-                f" +/- {result['slope_stderr']:.1e} mol/m^3/s"
+                f"fit: slope = {result['slope']:+.3e} +/- {result['slope_stderr']:.1e} mol/m^3/s"
             ),
         )
         ax.axhline(0, color="k", lw=0.5)
