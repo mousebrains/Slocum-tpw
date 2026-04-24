@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `simulate-leak` subcommand: simulate sealed-body vacuum and vehicle
+  temperature observations for a Slocum Glider with a sinusoidal thermal
+  cycle and optional constant-rate leak, using the van der Waals equation of
+  state for air.  Writes CSV with Slocum native column names
+  (`m_present_time`, `m_vacuum`, `m_veh_temp`).
+- `analyze-leak` subcommand: estimate d(n/V)/dt and its 1-sigma uncertainty
+  from a CSV of sealed-body observations by inverting van der Waals per
+  sample and least-squares fitting the inferred molar density vs. time.
+  Column names are overridable so it can be run on real glider CSV exports.
+- Public APIs `slocum_tpw.simulate_leak` (`simulate()`, `write_csv()`,
+  `vdw_pressure()`, `vdw_density()`) and `slocum_tpw.analyze_leak`
+  (`load_csv()`, `fit_leak_rate()`).
+
 ## [0.1.5] - 2026-03-26
 
 ### Added

@@ -80,6 +80,28 @@ def main(argv: list[str] | None = None) -> None:
     add_rb_args(rb_parser)
     rb_parser.set_defaults(func=run_rb)
 
+    # -- simulate-leak --
+    from slocum_tpw.simulate_leak import add_arguments as add_sl_args
+    from slocum_tpw.simulate_leak import run as run_sl
+
+    sl_parser = subparsers.add_parser(
+        "simulate-leak",
+        help="Simulate sealed-body vacuum observations for leak-detection testing",
+    )
+    add_sl_args(sl_parser)
+    sl_parser.set_defaults(func=run_sl)
+
+    # -- analyze-leak --
+    from slocum_tpw.analyze_leak import add_arguments as add_al_args
+    from slocum_tpw.analyze_leak import run as run_al
+
+    al_parser = subparsers.add_parser(
+        "analyze-leak",
+        help="Estimate d(n/V)/dt and its uncertainty from sealed-body observations",
+    )
+    add_al_args(al_parser)
+    al_parser.set_defaults(func=run_al)
+
     args = parser.parse_args(argv)
 
     if args.command is None:
