@@ -42,6 +42,7 @@ def parse_log_file(fn: str, glider: str) -> pd.DataFrame:
             try:
                 line = str(line, "utf-8")
             except UnicodeDecodeError:
+                logging.debug("Skipping non-UTF-8 line in %s", fn)
                 continue
             if not line:
                 continue
@@ -60,7 +61,7 @@ def parse_log_file(fn: str, glider: str) -> pd.DataFrame:
                     try:
                         currTime = (
                             datetime.datetime.strptime(matches[1], "%b %d %H:%M:%S %Y")
-                            .replace(tzinfo=datetime.timezone.utc)
+                            .replace(tzinfo=datetime.UTC)
                             .timestamp()
                         )
                     except ValueError:
@@ -160,6 +161,15 @@ def process_files(
     When the output file already exists and contains a ``processed_files``
     attribute, only new files are parsed and appended.  Pass
     ``reprocess=True`` to ignore the existing output and reprocess all files.
+
+    Notes
+    -----
+    Slocum log timestamps are interpreted as UTC.  Drift between the glider's
+    clock and UTC is not corrected for.
+
+    The output NetCDF is read, modified, and rewritten in place; concurrent
+    invocations against the same output path race and the second writer wins.
+    Run incremental updates serially.
     """
     # Build candidate list (valid filenames passing the t0 filter)
     candidates = []
@@ -222,7 +232,7 @@ def process_files(
     if not parts:
         return
 
-    combined = pd.concat(parts, ignore_index=True)
+    combined = pd.concat(parts, ignore_index=True).sort_values("t").reset_index(drop=True)
     ds = xr.Dataset.from_dataframe(combined)
 
     # Track all processed files

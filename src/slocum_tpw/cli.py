@@ -1,10 +1,41 @@
 """Command-line interface for slocum-tpw."""
 
 import argparse
+import importlib
 import logging
 import sys
 
 from slocum_tpw import __version__
+
+# Subcommand registry: name -> (module path, help text).
+# Modules are imported lazily so cold-start latency for lightweight subcommands
+# (decode-argos, log-harvest) does not pay for matplotlib / scipy / gsw.
+_SUBCOMMANDS = {
+    "decode-argos": (
+        "slocum_tpw.decode_argos",
+        "Decode ARGOS satellite messages into NetCDF",
+    ),
+    "log-harvest": (
+        "slocum_tpw.log_harvest",
+        "Harvest Slocum glider log files into NetCDF",
+    ),
+    "mk-combined": (
+        "slocum_tpw.mk_combined",
+        "Combine glider data into CF-compliant NetCDF",
+    ),
+    "recover-by": (
+        "slocum_tpw.recover_by",
+        "Estimate glider recovery date from battery decay",
+    ),
+    "simulate-leak": (
+        "slocum_tpw.simulate_leak",
+        "Simulate sealed-body vacuum observations for leak-detection testing",
+    ),
+    "analyze-leak": (
+        "slocum_tpw.analyze_leak",
+        "Estimate d(n/V)/dt and its uncertainty from sealed-body observations",
+    ),
+}
 
 
 def _add_logging_args(parser: argparse.ArgumentParser) -> None:
@@ -31,6 +62,9 @@ def _configure_logging(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     """Entry point for the slocum-tpw CLI."""
+    if argv is None:
+        argv = sys.argv[1:]
+
     parser = argparse.ArgumentParser(
         prog="slocum-tpw",
         description="TWR Slocum glider data processing utilities",
@@ -40,45 +74,22 @@ def main(argv: list[str] | None = None) -> None:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    # -- decode-argos --
-    from slocum_tpw.decode_argos import add_arguments as add_da_args
-    from slocum_tpw.decode_argos import run as run_da
+    # Pre-scan argv for the requested subcommand so we only import its module.
+    # Top-level flags (--version, --verbose, --debug) take no values, so the
+    # first argv entry that matches a known subcommand name is the subcommand.
+    invoked = next((a for a in argv if a in _SUBCOMMANDS), None)
 
-    da_parser = subparsers.add_parser(
-        "decode-argos", help="Decode ARGOS satellite messages into NetCDF"
-    )
-    add_da_args(da_parser)
-    da_parser.set_defaults(func=run_da)
-
-    # -- log-harvest --
-    from slocum_tpw.log_harvest import add_arguments as add_lh_args
-    from slocum_tpw.log_harvest import run as run_lh
-
-    lh_parser = subparsers.add_parser(
-        "log-harvest", help="Harvest Slocum glider log files into NetCDF"
-    )
-    add_lh_args(lh_parser)
-    lh_parser.set_defaults(func=run_lh)
-
-    # -- mk-combined --
-    from slocum_tpw.mk_combined import add_arguments as add_mc_args
-    from slocum_tpw.mk_combined import run as run_mc
-
-    mc_parser = subparsers.add_parser(
-        "mk-combined", help="Combine glider data into CF-compliant NetCDF"
-    )
-    add_mc_args(mc_parser)
-    mc_parser.set_defaults(func=run_mc)
-
-    # -- recover-by --
-    from slocum_tpw.recover_by import add_arguments as add_rb_args
-    from slocum_tpw.recover_by import run as run_rb
-
-    rb_parser = subparsers.add_parser(
-        "recover-by", help="Estimate glider recovery date from battery decay"
-    )
-    add_rb_args(rb_parser)
-    rb_parser.set_defaults(func=run_rb)
+    if invoked is not None:
+        module_name, help_text = _SUBCOMMANDS[invoked]
+        module = importlib.import_module(module_name)
+        sub = subparsers.add_parser(invoked, help=help_text)
+        module.add_arguments(sub)
+        sub.set_defaults(func=module.run)
+    else:
+        # No subcommand on the command line: register lightweight stubs so
+        # --help still lists every subcommand.
+        for name, (_, help_text) in _SUBCOMMANDS.items():
+            subparsers.add_parser(name, help=help_text)
 
     args = parser.parse_args(argv)
 

@@ -34,6 +34,12 @@ slocum-tpw mk-combined --glider 684 --output osu684.nc
 
 # Estimate recovery date from battery decay
 slocum-tpw recover-by --threshold 15 flight.nc
+
+# Simulate sealed-body vacuum observations (for leak-detection testing)
+slocum-tpw simulate-leak --vacuum-drop-per-day 0.075 --days 4 -o sim.csv
+
+# Estimate d(n/V)/dt and its uncertainty from vacuum observations
+slocum-tpw analyze-leak sim.csv
 ```
 
 All subcommands support `--verbose` (INFO) and `--debug` (DEBUG) logging flags.
@@ -265,6 +271,134 @@ slocum-tpw recover-by --confidence 0.99 --sensor my_battery_pct data.nc
 
 ---
 
+### `slocum-tpw simulate-leak`
+
+Simulate sealed-body vacuum and vehicle-temperature observations for a Slocum
+Glider, using the van der Waals equation of state for air.  The gas volume is
+assumed constant in time and temperature; the air temperature cycles
+sinusoidally.  An optional constant-rate leak is added as a linear drift in
+the number of moles of gas.
+
+```
+slocum-tpw simulate-leak [options]
+```
+
+| Argument | Description |
+|---|---|
+| `-o PATH`, `--output PATH` | Output CSV path (default: `simulated.csv`) |
+| `--days N` | Simulation duration in days (default: `4`) |
+| `--timestep SEC` | Sampling interval in seconds (default: `3`) |
+| `--vacuum-drop-per-day X` | Signed leak rate in inHg/day of vacuum DROP. Positive = vacuum decreasing (gas leaking IN). Negative = vacuum increasing (gas leaking OUT). Default: `0` (no leak) |
+| `--sigma-pressure X` | 1-sigma Gaussian noise on vacuum, inHg (default: `0.001`) |
+| `--sigma-temp X` | 1-sigma Gaussian noise on temperature, degC (default: `0.1`) |
+| `--initial-vacuum X` | Initial vacuum at t=0, inHg (default: `10`) |
+| `--volume L` | Sealed gas volume, liters (default: `50`) |
+| `--temp-mean X` | Mean air temperature, degC (default: `17.5`) |
+| `--temp-amplitude X` | Thermal amplitude, degC (default: `2.5`) |
+| `--temp-period-hours X` | Thermal cycle period, hours (default: `24`) |
+| `--seed N` | RNG seed for reproducibility (default: random) |
+| `--t0-epoch SEC` | Seconds at t=0 (default: `0`); set to a Unix epoch time to produce absolute timestamps |
+
+**Output CSV** uses Slocum native column names (`m_present_time`, `m_vacuum`,
+`m_veh_temp`) in units of seconds, inHg, and degC respectively, so the
+`analyze-leak` subcommand can be applied to both simulated and real glider
+CSV exports without column remapping.
+
+**Algorithm:**
+
+1. Initial conditions: internal absolute pressure is `P_atm - initial_vacuum`
+   at the reference (warmest) air temperature.  Solve van der Waals for
+   the starting molar density `rho0`.
+2. Derive the constant `d(rho)/dt` that, at the reference temperature,
+   produces the requested vacuum drift per day.
+3. Evaluate the noise-free `(P, T)` at each sample using van der Waals on a
+   linearly drifting `rho(t)` and a sinusoidal `T(t)`.
+4. Add independent Gaussian noise to pressure and temperature at each sample.
+
+**Example:**
+
+```bash
+# 0.3 inHg vacuum drop over 4 days (simulating a small leak), reproducible
+slocum-tpw simulate-leak --vacuum-drop-per-day 0.075 --days 4 \
+    --seed 42 -o sim_leak.csv
+
+# No leak, quiet reference dataset for comparison
+slocum-tpw simulate-leak --vacuum-drop-per-day 0 --days 4 \
+    --seed 42 -o sim_noleak.csv
+```
+
+---
+
+### `slocum-tpw analyze-leak`
+
+Estimate `d(n/V)/dt` and its 1-sigma uncertainty from a CSV of sealed-body
+observations.  Works on the CSV written by `simulate-leak` as well as on any
+CSV containing time (seconds), vacuum (inHg), and vehicle temperature (degC)
+columns.
+
+```
+slocum-tpw analyze-leak [options] CSV_FILE
+```
+
+| Argument | Description |
+|---|---|
+| `CSV_FILE` | Path to input CSV (required) |
+| `--time-col NAME` | Time column name in seconds (default: `m_present_time`) |
+| `--vacuum-col NAME` | Vacuum column name in inHg (default: `m_vacuum`) |
+| `--temp-col NAME` | Temperature column name in degC (default: `m_veh_temp`) |
+| `--plot PATH` | Save a fit diagnostic plot to `PATH` (default: no plot) |
+
+**Algorithm:**
+
+1. For each sample, convert `(m_vacuum, m_veh_temp)` to absolute pressure
+   (Pa) and temperature (K), then solve the van der Waals equation of state
+   for the inferred molar density `rho(t) = n / V`.
+2. Least-squares linear fit `rho(t) = intercept + slope * t` via
+   `scipy.stats.linregress`.  The slope is the estimated `d(n/V)/dt`; the
+   regression standard error on the slope is its 1-sigma uncertainty.
+3. The reported z-score `slope / sigma` is a quick significance indicator:
+   `|z| > ~3` suggests a real trend.
+
+Non-numeric rows, non-finite values, and vdW inversion failures are dropped
+from the fit (with a warning).  Input is sorted by time defensively.
+
+**Text output:**
+
+```
+file                : sim_leak.csv
+rows used           : 115201
+time span           : 345600.0 s (4.0000 days)
+rho range           : 27.6569 .. 28.1344 mol/m^3
+residual sigma(rho) : 9.7539e-03 mol/m^3
+
+Linear fit: rho(t) = intercept + slope * t
+  slope              = +1.2069e-06 mol/(m^3 * s)
+  slope 1-sigma      = 2.8805e-10 mol/(m^3 * s)
+  slope 95% CI       = +/- 5.6457e-10 mol/(m^3 * s)
+
+  slope (per day)    = +1.0428e-01 mol/(m^3 * day)
+  slope 1-sigma (/d) = 2.4887e-05 mol/(m^3 * day)
+
+  intercept          = 27.692575 mol/m^3
+  intercept 1-sigma  = 5.7475e-05 mol/m^3
+  slope / sigma      = +4189.94  (|z| > ~3 suggests a real trend)
+```
+
+**Examples:**
+
+```bash
+# Round-trip test against the simulator
+slocum-tpw simulate-leak --vacuum-drop-per-day 0.075 --days 4 \
+    --seed 42 -o sim_leak.csv
+slocum-tpw analyze-leak sim_leak.csv --plot sim_leak_fit.png
+
+# Real glider data with non-default column names
+slocum-tpw analyze-leak glider.csv \
+    --time-col timestamp --vacuum-col vacuum_inHg --temp-col temp_C
+```
+
+---
+
 ## Python API
 
 All subcommand functionality is available as importable functions.
@@ -449,6 +583,113 @@ degrees of freedom — only tau importance weights trigger Kish's correction.
 
 List of matplotlib color names used for multi-window plots:
 `["tab:green", "tab:orange", "tab:purple", "tab:red", "tab:brown", "tab:pink"]`.
+
+---
+
+### `slocum_tpw.simulate_leak`
+
+```python
+from slocum_tpw.simulate_leak import simulate, write_csv, vdw_density, vdw_pressure
+
+# Simulate 4 days with a 0.3 inHg total vacuum drop, default 3 s cadence
+result = simulate(
+    days=4.0, timestep=3.0,
+    vacuum_drop_per_day=0.075,
+    sigma_pressure=0.001, sigma_temperature=0.1,
+    seed=42,
+)
+
+# Write to a Slocum-native CSV (columns: m_present_time, m_vacuum, m_veh_temp)
+write_csv("sim.csv", result["time"], result["vacuum_inHg"], result["temperature_c"])
+```
+
+#### `simulate(days, timestep, vacuum_drop_per_day=0.0, initial_vacuum=10.0, volume_l=50.0, temp_mean_c=17.5, temp_amplitude_c=2.5, temp_period_hours=24.0, sigma_pressure=0.001, sigma_temperature=0.1, seed=None, t0_epoch=0.0) -> dict`
+
+Simulate sealed-body vacuum and temperature observations.  Returns a dict with:
+
+| Key | Type | Description |
+|---|---|---|
+| `time` | `np.ndarray` | Sample times in seconds, offset by *t0_epoch* |
+| `vacuum_inHg` | `np.ndarray` | Noisy vacuum observations (inHg) |
+| `temperature_c` | `np.ndarray` | Noisy vehicle temperature observations (degC) |
+| `vacuum_true_inHg` | `np.ndarray` | Noise-free vacuum |
+| `temperature_true_c` | `np.ndarray` | Noise-free temperature |
+| `drho_dt_true` | `float` | Constant leak rate, mol/(m^3 * s), implied by *vacuum_drop_per_day* at the reference temperature |
+| `rho0` | `float` | Initial molar density (mol/m^3) |
+| `volume_m3` | `float` | Sealed volume (m^3) |
+
+Positive *vacuum_drop_per_day* means vacuum is decreasing (gas leaking in);
+negative means vacuum is increasing (gas leaking out); `0` is no leak.
+
+#### `write_csv(path, time_s, vacuum_inHg, temperature_c) -> None`
+
+Write a three-column CSV with header `m_present_time,m_vacuum,m_veh_temp`
+and values rounded to 3, 6, and 4 decimal places respectively.
+
+#### `vdw_pressure(rho, T) -> float` / `vdw_density(P, T) -> float` / `vdw_density_vec(P, T) -> np.ndarray`
+
+Forward and inverse van der Waals EOS for air (constants `A_VDW = 0.1358`
+Pa·m⁶/mol², `B_VDW = 3.64e-5` m³/mol).  `vdw_density` solves the forward
+relation for molar density via `scipy.optimize.brentq` and is accurate to
+double precision.  `vdw_density_vec` is a vectorized Newton-method version
+used by `analyze-leak` for ~100× speedup on bulk arrays; entries that fail
+to converge are returned as `NaN`.
+
+---
+
+### `slocum_tpw.analyze_leak`
+
+```python
+from slocum_tpw.analyze_leak import load_csv, fit_leak_rate
+
+t, vacuum_inHg, temp_c = load_csv("sim.csv")
+fit = fit_leak_rate(t, vacuum_inHg, temp_c)
+print(f"d(n/V)/dt = {fit['slope']:+.3e} +/- {fit['slope_stderr']:.1e} mol/m^3/s")
+```
+
+#### `load_csv(path, time_col="m_present_time", vacuum_col="m_vacuum", temp_col="m_veh_temp") -> (time, vacuum_inHg, temperature_c)`
+
+Load three columns from a CSV file.  Non-numeric rows and non-finite values
+are silently skipped.  Returns three `np.ndarray` objects sorted by time.
+Raises `KeyError` if any requested column is missing and `ValueError` if the
+file is empty.
+
+#### `fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict`
+
+Invert van der Waals per sample to get molar density `rho(t) = n/V`, then
+least-squares fit `rho(t) = intercept + slope * t` using
+`scipy.stats.linregress`.  Returns a dict with:
+
+| Key | Type | Description |
+|---|---|---|
+| `slope` | `float` | `d(n/V)/dt` estimate, mol/(m^3 * s) |
+| `slope_stderr` | `float` | 1-sigma regression standard error on slope |
+| `slope_95ci` | `float` | `1.96 * slope_stderr` (half-width of 95% CI) |
+| `slope_per_day`, `slope_stderr_per_day` | `float` | Slope converted to mol/(m^3 * day) |
+| `intercept`, `intercept_stderr` | `float` | Fit intercept (mol/m^3) and its 1-sigma |
+| `sigma_rho` | `float` | Residual scatter of rho about the fit |
+| `z_score` | `float` | `slope / slope_stderr`; `|z| > ~3` suggests real trend |
+| `n_points` | `int` | Rows used after filtering |
+| `time_span_s` | `float` | `time[-1] - time[0]` |
+| `time`, `rho` | `np.ndarray` | Valid-sample times and inferred molar densities |
+
+Raises `ValueError` if fewer than 3 usable rows survive filtering.
+
+**Noise floor:**
+
+For the default simulation parameters (50 L volume, 10 inHg initial vacuum,
+T ~ 293 K, `sigma_P = 0.001 inHg`, `sigma_T = 0.1 degC`), the per-sample
+scatter in the inferred `rho` is dominated by the temperature measurement:
+
+- contribution from pressure noise: `sigma_P / (R * T) ≈ 1.4e-3` mol/m³
+- contribution from temperature noise: `rho * sigma_T / T ≈ 9.5e-3` mol/m³
+
+Linear regression on `N` independent samples over a time span `T` reduces
+this to `sigma_slope ~ sigma_rho * sqrt(12 / N) / T`.  For a 4-day window at
+3 s cadence (`N ~ 1.15e5`) the 1-sigma slope uncertainty is about
+`3e-10 mol/(m^3 * s)`, corresponding to a vacuum drop of roughly
+60 μinHg over 4 days.  Leaks much larger than this are statistically
+detectable within the window.
 
 ---
 

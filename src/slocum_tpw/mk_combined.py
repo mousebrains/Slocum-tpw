@@ -45,14 +45,14 @@ def mk_combo(
                 logging.error("No data for glider %s in %s", gld, fn_log)
                 return False
         dfLog = pd.DataFrame()
-        dfLog["timeu"] = ds.t.data.astype("datetime64[s]").astype(float)
+        dfLog["timeu"] = ds.t.data.astype("datetime64[s]").astype("int64").astype(float)
         dfLog["latu"] = ds.lat.data if "lat" in ds else np.full(len(ds.index), np.nan)
         dfLog["lonu"] = ds.lon.data if "lon" in ds else np.full(len(ds.index), np.nan)
         dfLog["u"] = ds.m_water_vx
         dfLog["v"] = ds.m_water_vy
-        dfLog = dfLog.dropna(axis=0, subset=dfLog.columns[1:], how="all")
+        dfLog = dfLog.dropna(axis=0, subset=["latu", "lonu", "u", "v"], how="all")
         dfLog = dfLog[dfLog.timeu > 0]
-        (t, ix) = np.unique(dfLog.timeu, return_index=True)
+        (_t, ix) = np.unique(dfLog.timeu, return_index=True)
         dfLog = dfLog.iloc[ix]
 
         # Interpolate missing GPS in log data
@@ -91,7 +91,7 @@ def mk_combo(
         flt["lonGPS"] = mk_degrees(ds.m_gps_lon.data)
         flt = flt.dropna(axis=0, subset=flt.columns, how="any")
         flt = flt[flt.time > 0]
-        (t, ix) = np.unique(flt.time, return_index=True)
+        (_t, ix) = np.unique(flt.time, return_index=True)
         flt = flt.iloc[ix]
         if len(flt) < 2:
             logging.error("Fewer than 2 GPS fixes in %s for %s, cannot interpolate", fn_flt, gld)
@@ -152,7 +152,7 @@ def mk_combo(
         sci = sci.drop(columns=["C", "P"])
         n_total = len(sci)
         sci = sci.dropna(axis=0, subset=[c for c in sci.columns if c != "time"], how="any")
-        (t, ix) = np.unique(sci.time, return_index=True)
+        (_t, ix) = np.unique(sci.time, return_index=True)
         sci = sci.iloc[ix]
         logging.info(
             "%s: %d science records (%d dropped during QC)", gld, len(sci), n_total - len(sci)
@@ -267,8 +267,8 @@ def mk_combo(
             comment="In-situ density minus 1000 kg m-3",
         ),
     )
-    attrs["lonu"] = attrs["lon"]
-    attrs["latu"] = attrs["lat"]
+    attrs["lonu"] = dict(attrs["lon"])
+    attrs["latu"] = dict(attrs["lat"])
 
     ds.time.attrs.update(attrs["time"])
     ds.timeu.attrs.update(attrs["time"])
@@ -276,7 +276,7 @@ def mk_combo(
         if key in attrs:
             ds[key].attrs.update(attrs[key])
 
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     ds.attrs.update(
         dict(
             title=f"{gld}" if gld else "TWR Slocum",

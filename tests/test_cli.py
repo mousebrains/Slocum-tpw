@@ -139,3 +139,59 @@ class TestCLI:
                 ]
             )
         assert exc_info.value.code == 1
+
+    def test_simulate_leak_subcommand(self, tmp_path):
+        """simulate-leak should write a non-empty CSV."""
+        out = tmp_path / "sim.csv"
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "simulate-leak",
+                    "--days",
+                    "0.01",
+                    "--timestep",
+                    "30",
+                    "--seed",
+                    "1",
+                    "-o",
+                    str(out),
+                ]
+            )
+        assert exc_info.value.code == 0
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+    def test_analyze_leak_subcommand(self, tmp_path):
+        """simulate-leak then analyze-leak should round-trip via the CLI."""
+        sim = tmp_path / "sim.csv"
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "simulate-leak",
+                    "--days",
+                    "0.5",
+                    "--timestep",
+                    "10",
+                    "--vacuum-drop-per-day",
+                    "0.075",
+                    "--seed",
+                    "2",
+                    "-o",
+                    str(sim),
+                ]
+            )
+        assert exc_info.value.code == 0
+        plot = tmp_path / "fit.png"
+        with pytest.raises(SystemExit) as exc_info:
+            main(["analyze-leak", str(sim), "--plot", str(plot)])
+        assert exc_info.value.code == 0
+        assert plot.exists()
+        assert plot.stat().st_size > 0
+
+    def test_analyze_leak_bad_columns(self, tmp_path):
+        """analyze-leak should exit non-zero when columns are missing."""
+        bad = tmp_path / "bad.csv"
+        bad.write_text("a,b,c\n1,2,3\n")
+        with pytest.raises(SystemExit) as exc_info:
+            main(["analyze-leak", str(bad)])
+        assert exc_info.value.code == 1

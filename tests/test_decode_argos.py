@@ -62,7 +62,7 @@ class TestProcFile:
         df = proc_file(str(fn))
         assert df is not None
         t = df.iloc[0]["time"]
-        assert t.tzinfo == datetime.timezone.utc
+        assert t.tzinfo == datetime.UTC
         assert t.year == 2023
         assert t.month == 6
         assert t.day == 15
