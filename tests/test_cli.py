@@ -195,3 +195,21 @@ class TestCLI:
         with pytest.raises(SystemExit) as exc_info:
             main(["analyze-leak", str(bad)])
         assert exc_info.value.code == 1
+
+    def test_analyze_leak_netcdf_input(self, tmp_path):
+        """analyze-leak should accept a NetCDF file with the standard columns."""
+        from slocum_tpw.simulate_leak import simulate
+
+        r = simulate(days=0.5, timestep=10, vacuum_drop_per_day=0.075, seed=37)
+        nc = tmp_path / "obs.nc"
+        ds = xr.Dataset(
+            {
+                "m_present_time": ("i", r["time"]),
+                "m_vacuum": ("i", r["vacuum_inHg"]),
+                "m_veh_temp": ("i", r["temperature_c"]),
+            }
+        )
+        ds.to_netcdf(nc)
+        with pytest.raises(SystemExit) as exc_info:
+            main(["analyze-leak", str(nc)])
+        assert exc_info.value.code == 0

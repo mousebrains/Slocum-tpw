@@ -2,8 +2,9 @@
 
 import numpy as np
 import pytest
+import xarray as xr
 
-from slocum_tpw.analyze_leak import fit_leak_rate, load_csv
+from slocum_tpw.analyze_leak import _load, fit_leak_rate, load_csv, load_netcdf
 from slocum_tpw.simulate_leak import simulate, write_csv
 
 
@@ -127,3 +128,144 @@ class TestEndToEnd:
         fit = fit_leak_rate(t, v, T)
         assert abs(fit["slope"] - r["drho_dt_true"]) < 5.0 * fit["slope_stderr"]
         assert fit["z_score"] > 50.0
+
+    def test_netcdf_pipeline_recovers_leak(self, tmp_path):
+        """simulate -> NetCDF -> load_netcdf -> fit_leak_rate: recover truth."""
+        r = simulate(
+            days=2.0,
+            timestep=6.0,
+            vacuum_drop_per_day=0.05,
+            seed=31,
+        )
+        fn = tmp_path / "pipeline.nc"
+        ds = xr.Dataset(
+            {
+                "m_present_time": ("i", r["time"]),
+                "m_vacuum": ("i", r["vacuum_inHg"]),
+                "m_veh_temp": ("i", r["temperature_c"]),
+            }
+        )
+        ds.to_netcdf(fn)
+
+        t, v, T = load_netcdf(str(fn))
+        fit = fit_leak_rate(t, v, T)
+        assert abs(fit["slope"] - r["drho_dt_true"]) < 5.0 * fit["slope_stderr"]
+        assert fit["z_score"] > 50.0
+
+
+def _write_obs_nc(path, time=None, vacuum=None, temp=None, time_units=None):
+    """Write a small NetCDF with the standard column names; helper for tests."""
+    if time is None:
+        time = np.array([0.0, 3.0, 6.0])
+    if vacuum is None:
+        vacuum = np.full(len(time), 10.0)
+    if temp is None:
+        temp = np.full(len(time), 20.0)
+    time_attrs = {"units": time_units} if time_units else {}
+    ds = xr.Dataset(
+        {
+            "m_present_time": ("i", np.asarray(time), time_attrs),
+            "m_vacuum": ("i", np.asarray(vacuum)),
+            "m_veh_temp": ("i", np.asarray(temp)),
+        }
+    )
+    ds.to_netcdf(path)
+
+
+class TestLoadNetcdf:
+    def test_basic_roundtrip(self, tmp_path):
+        fn = tmp_path / "obs.nc"
+        _write_obs_nc(
+            fn,
+            time=[0.0, 3.0, 6.0, 9.0],
+            vacuum=[10.0, 10.001, 9.999, 10.0],
+            temp=[20.0, 20.1, 19.9, 20.0],
+        )
+        t, v, T = load_netcdf(str(fn))
+        np.testing.assert_allclose(t, [0.0, 3.0, 6.0, 9.0])
+        np.testing.assert_allclose(v, [10.0, 10.001, 9.999, 10.0])
+        np.testing.assert_allclose(T, [20.0, 20.1, 19.9, 20.0])
+
+    def test_column_override(self, tmp_path):
+        fn = tmp_path / "obs.nc"
+        ds = xr.Dataset(
+            {
+                "timestamp": ("i", np.array([0.0, 3.0, 6.0])),
+                "vac_inHg": ("i", np.array([10.0, 10.001, 9.999])),
+                "temp_C": ("i", np.array([20.0, 20.0, 20.0])),
+            }
+        )
+        ds.to_netcdf(fn)
+        t, _v, _T = load_netcdf(
+            str(fn), time_col="timestamp", vacuum_col="vac_inHg", temp_col="temp_C"
+        )
+        np.testing.assert_allclose(t, [0.0, 3.0, 6.0])
+
+    def test_missing_variable_raises_key_error(self, tmp_path):
+        fn = tmp_path / "obs.nc"
+        ds = xr.Dataset(
+            {
+                "m_present_time": ("i", np.array([0.0, 1.0])),
+                "m_vacuum": ("i", np.array([10.0, 10.0])),
+            }
+        )
+        ds.to_netcdf(fn)
+        with pytest.raises(KeyError):
+            load_netcdf(str(fn))
+
+    def test_non_finite_dropped(self, tmp_path):
+        fn = tmp_path / "obs.nc"
+        _write_obs_nc(
+            fn,
+            time=[0.0, 3.0, 6.0, 9.0],
+            vacuum=[10.0, np.nan, 9.999, 10.0],
+            temp=[20.0, 20.0, 20.0, np.inf],
+        )
+        t, _v, _T = load_netcdf(str(fn))
+        np.testing.assert_allclose(t, [0.0, 6.0])
+
+    def test_unsorted_input_is_sorted(self, tmp_path):
+        fn = tmp_path / "obs.nc"
+        _write_obs_nc(fn, time=[6.0, 0.0, 3.0])
+        t, _v, _T = load_netcdf(str(fn))
+        np.testing.assert_allclose(t, [0.0, 3.0, 6.0])
+
+    def test_datetime64_time_converted_to_posix(self, tmp_path):
+        fn = tmp_path / "obs.nc"
+        # Write CF-compliant time so xarray decodes it as datetime64 on read.
+        times = np.array([0.0, 60.0, 120.0])  # seconds since epoch
+        ds = xr.Dataset(
+            {
+                "m_present_time": (
+                    "i",
+                    times,
+                    {"units": "seconds since 1970-01-01T00:00:00"},
+                ),
+                "m_vacuum": ("i", np.array([10.0, 10.0, 10.0])),
+                "m_veh_temp": ("i", np.array([20.0, 20.0, 20.0])),
+            }
+        )
+        ds.to_netcdf(fn)
+        t, _v, _T = load_netcdf(str(fn))
+        # Should round-trip back to POSIX seconds, regardless of dtype on disk.
+        np.testing.assert_allclose(t, [0.0, 60.0, 120.0])
+
+
+class TestDispatch:
+    def test_dispatch_csv(self, tmp_path):
+        fn = tmp_path / "obs.csv"
+        fn.write_text("m_present_time,m_vacuum,m_veh_temp\n0.0,10.0,20.0\n3.0,10.0,20.0\n")
+        t, _v, _T = _load(str(fn), "m_present_time", "m_vacuum", "m_veh_temp")
+        assert t.size == 2
+
+    def test_dispatch_netcdf(self, tmp_path):
+        fn = tmp_path / "obs.nc"
+        _write_obs_nc(fn)
+        t, _v, _T = _load(str(fn), "m_present_time", "m_vacuum", "m_veh_temp")
+        assert t.size == 3
+
+    def test_dispatch_uppercase_extension(self, tmp_path):
+        fn = tmp_path / "obs.NC"
+        _write_obs_nc(fn)
+        t, _v, _T = _load(str(fn), "m_present_time", "m_vacuum", "m_veh_temp")
+        assert t.size == 3

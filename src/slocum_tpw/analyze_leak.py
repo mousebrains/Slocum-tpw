@@ -16,11 +16,14 @@
 import argparse
 import csv
 import logging
+from pathlib import Path
 
 import numpy as np
 from scipy import stats
 
 from slocum_tpw.simulate_leak import INHG_TO_PA, P_ATM_PA, vdw_density_vec
+
+_NETCDF_SUFFIXES = {".nc", ".nc4", ".netcdf", ".cdf"}
 
 
 def load_csv(
@@ -67,6 +70,62 @@ def load_csv(
     T = np.asarray(T_list, dtype=float)
     order = np.argsort(t)
     return t[order], v[order], T[order]
+
+
+def load_netcdf(
+    path: str,
+    time_col: str = "m_present_time",
+    vacuum_col: str = "m_vacuum",
+    temp_col: str = "m_veh_temp",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load time, vacuum, and temperature variables from a NetCDF file.
+
+    Non-finite values are silently dropped.  Returns three numpy arrays
+    (time in seconds, vacuum in inHg, temperature in degC), sorted by time.
+    Datetime64 time variables are converted to POSIX seconds.
+
+    Raises ``KeyError`` if any requested variable is missing.
+    """
+    import xarray as xr
+
+    with xr.open_dataset(path) as ds:
+        missing = [c for c in (time_col, vacuum_col, temp_col) if c not in ds.variables]
+        if missing:
+            raise KeyError(f"{path}: missing variable(s) {missing}; available {list(ds.variables)}")
+        t_raw = ds[time_col].values
+        v = np.asarray(ds[vacuum_col].values, dtype=float).ravel()
+        T = np.asarray(ds[temp_col].values, dtype=float).ravel()
+
+    if np.issubdtype(t_raw.dtype, np.datetime64):
+        t = (t_raw - np.datetime64("1970-01-01T00:00:00")) / np.timedelta64(1, "s")
+        t = np.asarray(t, dtype=float).ravel()
+    else:
+        t = np.asarray(t_raw, dtype=float).ravel()
+
+    if not (t.size == v.size == T.size):
+        raise ValueError(
+            f"{path}: variables have inconsistent lengths "
+            f"({time_col}={t.size}, {vacuum_col}={v.size}, {temp_col}={T.size})"
+        )
+
+    good = np.isfinite(t) & np.isfinite(v) & np.isfinite(T)
+    t = t[good]
+    v = v[good]
+    T = T[good]
+    order = np.argsort(t)
+    return t[order], v[order], T[order]
+
+
+def _load(
+    path: str,
+    time_col: str,
+    vacuum_col: str,
+    temp_col: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Dispatch to ``load_netcdf`` for ``.nc``-style files, else ``load_csv``."""
+    if Path(path).suffix.lower() in _NETCDF_SUFFIXES:
+        return load_netcdf(path, time_col=time_col, vacuum_col=vacuum_col, temp_col=temp_col)
+    return load_csv(path, time_col=time_col, vacuum_col=vacuum_col, temp_col=temp_col)
 
 
 def fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict:
@@ -147,24 +206,31 @@ def fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict:
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Add analyze-leak arguments to the parser."""
-    parser.add_argument("csv_file", type=str, help="Path to input CSV")
+    parser.add_argument(
+        "input_file",
+        type=str,
+        metavar="FILE",
+        help=(
+            "Path to input CSV or NetCDF file (NetCDF is detected by .nc/.nc4/.netcdf/.cdf suffix)"
+        ),
+    )
     parser.add_argument(
         "--time-col",
         type=str,
         default="m_present_time",
-        help="Time column name, seconds (default: m_present_time)",
+        help="Time column/variable name, seconds (default: m_present_time)",
     )
     parser.add_argument(
         "--vacuum-col",
         type=str,
         default="m_vacuum",
-        help="Vacuum column name, inHg (default: m_vacuum)",
+        help="Vacuum column/variable name, inHg (default: m_vacuum)",
     )
     parser.add_argument(
         "--temp-col",
         type=str,
         default="m_veh_temp",
-        help="Temperature column name, degC (default: m_veh_temp)",
+        help="Temperature column/variable name, degC (default: m_veh_temp)",
     )
     parser.add_argument(
         "--plot",
@@ -178,18 +244,18 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 def run(args: argparse.Namespace) -> int:
     """Execute the analyze-leak command."""
     try:
-        t, vacuum, temp = load_csv(
-            args.csv_file,
+        t, vacuum, temp = _load(
+            args.input_file,
             time_col=args.time_col,
             vacuum_col=args.vacuum_col,
             temp_col=args.temp_col,
         )
     except (ValueError, KeyError, OSError) as e:
-        logging.error("failed to read %s: %s", args.csv_file, e)
+        logging.error("failed to read %s: %s", args.input_file, e)
         return 1
 
     if t.size < 3:
-        logging.error("not enough usable rows in %s (got %d)", args.csv_file, t.size)
+        logging.error("not enough usable rows in %s (got %d)", args.input_file, t.size)
         return 1
 
     try:
@@ -198,7 +264,7 @@ def run(args: argparse.Namespace) -> int:
         logging.error("fit failed: %s", e)
         return 1
 
-    print(f"file                : {args.csv_file}")
+    print(f"file                : {args.input_file}")
     print(f"rows used           : {result['n_points']}")
     print(
         f"time span           : {result['time_span_s']:.1f} s "
@@ -208,16 +274,20 @@ def run(args: argparse.Namespace) -> int:
     print(f"residual sigma(rho) : {result['sigma_rho']:.4e} mol/m^3")
     print()
     print("Linear fit: rho(t) = intercept + slope * t")
-    print(f"  slope              = {result['slope']:+.4e} mol/(m^3 * s)")
-    print(f"  slope 1-sigma      = {result['slope_stderr']:.4e} mol/(m^3 * s)")
+    print(
+        f"  slope              = {result['slope']:+.4e} +/- {result['slope_stderr']:.4e} "
+        f"mol/(m^3 * s)  (T-value = {result['z_score']:+.2f})"
+    )
     print(f"  slope 95% CI       = +/- {result['slope_95ci']:.4e} mol/(m^3 * s)")
     print()
-    print(f"  slope (per day)    = {result['slope_per_day']:+.4e} mol/(m^3 * day)")
-    print(f"  slope 1-sigma (/d) = {result['slope_stderr_per_day']:.4e} mol/(m^3 * day)")
+    print(
+        f"  slope (per day)    = {result['slope_per_day']:+.4e} +/- "
+        f"{result['slope_stderr_per_day']:.4e} mol/(m^3 * day)"
+    )
     print()
     print(f"  intercept          = {result['intercept']:.6f} mol/m^3")
     print(f"  intercept 1-sigma  = {result['intercept_stderr']:.4e} mol/m^3")
-    print(f"  slope / sigma      = {result['z_score']:+.2f}  (|z| > ~3 suggests a real trend)")
+    print("  (|T-value| > ~3 suggests a real trend)")
 
     if args.plot is not None:
         import matplotlib
@@ -245,13 +315,15 @@ def run(args: argparse.Namespace) -> int:
             color="C1",
             lw=1.4,
             label=(
-                f"fit: slope = {result['slope']:+.3e} +/- {result['slope_stderr']:.1e} mol/m^3/s"
+                f"fit: slope = {result['slope_per_day']:+.3e} +/- "
+                f"{result['slope_stderr_per_day']:.1e} mol/m^3/day "
+                f"(T-value = {result['z_score']:+.2f})"
             ),
         )
         ax.axhline(0, color="k", lw=0.5)
         ax.set_xlabel("Time from first sample (hours)")
         ax.set_ylabel("n/V - rho[0]  (mol/m^3)")
-        ax.set_title(f"Leak fit: {args.csv_file}")
+        ax.set_title(f"Leak fit: {args.input_file}")
         ax.grid(True, alpha=0.4)
         ax.legend(loc="upper right")
         fig.tight_layout()

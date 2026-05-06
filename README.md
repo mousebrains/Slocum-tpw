@@ -331,22 +331,27 @@ slocum-tpw simulate-leak --vacuum-drop-per-day 0 --days 4 \
 
 ### `slocum-tpw analyze-leak`
 
-Estimate `d(n/V)/dt` and its 1-sigma uncertainty from a CSV of sealed-body
-observations.  Works on the CSV written by `simulate-leak` as well as on any
-CSV containing time (seconds), vacuum (inHg), and vehicle temperature (degC)
-columns.
+Estimate `d(n/V)/dt` and its 1-sigma uncertainty from sealed-body
+observations.  Accepts either a CSV (e.g. the one written by `simulate-leak`)
+or a NetCDF file (e.g. a `dbd2netCDF` flight export) containing time
+(seconds), vacuum (inHg), and vehicle temperature (degC) columns or
+variables.  Format is selected from the file suffix
+(`.nc` / `.nc4` / `.netcdf` / `.cdf` -> NetCDF, else CSV).
 
 ```
-slocum-tpw analyze-leak [options] CSV_FILE
+slocum-tpw analyze-leak [options] FILE
 ```
 
 | Argument | Description |
 |---|---|
-| `CSV_FILE` | Path to input CSV (required) |
-| `--time-col NAME` | Time column name in seconds (default: `m_present_time`) |
-| `--vacuum-col NAME` | Vacuum column name in inHg (default: `m_vacuum`) |
-| `--temp-col NAME` | Temperature column name in degC (default: `m_veh_temp`) |
+| `FILE` | Path to input CSV or NetCDF file (required) |
+| `--time-col NAME` | Time column/variable name in seconds (default: `m_present_time`) |
+| `--vacuum-col NAME` | Vacuum column/variable name in inHg (default: `m_vacuum`) |
+| `--temp-col NAME` | Temperature column/variable name in degC (default: `m_veh_temp`) |
 | `--plot PATH` | Save a fit diagnostic plot to `PATH` (default: no plot) |
+
+NetCDF time variables stored as `datetime64` (e.g. CF `units = "seconds since
+1970-01-01"`) are converted to POSIX seconds automatically.
 
 **Algorithm:**
 
@@ -356,8 +361,8 @@ slocum-tpw analyze-leak [options] CSV_FILE
 2. Least-squares linear fit `rho(t) = intercept + slope * t` via
    `scipy.stats.linregress`.  The slope is the estimated `d(n/V)/dt`; the
    regression standard error on the slope is its 1-sigma uncertainty.
-3. The reported z-score `slope / sigma` is a quick significance indicator:
-   `|z| > ~3` suggests a real trend.
+3. The reported T-value `slope / sigma` is a quick significance indicator:
+   `|T| > ~3` suggests a real trend.
 
 Non-numeric rows, non-finite values, and vdW inversion failures are dropped
 from the fit (with a warning).  Input is sorted by time defensively.
@@ -372,16 +377,14 @@ rho range           : 27.6569 .. 28.1344 mol/m^3
 residual sigma(rho) : 9.7539e-03 mol/m^3
 
 Linear fit: rho(t) = intercept + slope * t
-  slope              = +1.2069e-06 mol/(m^3 * s)
-  slope 1-sigma      = 2.8805e-10 mol/(m^3 * s)
+  slope              = +1.2069e-06 +/- 2.8805e-10 mol/(m^3 * s)  (T-value = +4189.94)
   slope 95% CI       = +/- 5.6457e-10 mol/(m^3 * s)
 
-  slope (per day)    = +1.0428e-01 mol/(m^3 * day)
-  slope 1-sigma (/d) = 2.4887e-05 mol/(m^3 * day)
+  slope (per day)    = +1.0428e-01 +/- 2.4887e-05 mol/(m^3 * day)
 
   intercept          = 27.692575 mol/m^3
   intercept 1-sigma  = 5.7475e-05 mol/m^3
-  slope / sigma      = +4189.94  (|z| > ~3 suggests a real trend)
+  (|T-value| > ~3 suggests a real trend)
 ```
 
 **Examples:**
@@ -391,6 +394,9 @@ Linear fit: rho(t) = intercept + slope * t
 slocum-tpw simulate-leak --vacuum-drop-per-day 0.075 --days 4 \
     --seed 42 -o sim_leak.csv
 slocum-tpw analyze-leak sim_leak.csv --plot sim_leak_fit.png
+
+# Real glider NetCDF (dbd2netCDF flight export)
+slocum-tpw analyze-leak flight.nc --plot flight_fit.png
 
 # Real glider data with non-default column names
 slocum-tpw analyze-leak glider.csv \
@@ -640,9 +646,11 @@ to converge are returned as `NaN`.
 ### `slocum_tpw.analyze_leak`
 
 ```python
-from slocum_tpw.analyze_leak import load_csv, fit_leak_rate
+from slocum_tpw.analyze_leak import load_csv, load_netcdf, fit_leak_rate
 
 t, vacuum_inHg, temp_c = load_csv("sim.csv")
+# or, equivalently, on a NetCDF flight export:
+t, vacuum_inHg, temp_c = load_netcdf("flight.nc")
 fit = fit_leak_rate(t, vacuum_inHg, temp_c)
 print(f"d(n/V)/dt = {fit['slope']:+.3e} +/- {fit['slope_stderr']:.1e} mol/m^3/s")
 ```
@@ -653,6 +661,14 @@ Load three columns from a CSV file.  Non-numeric rows and non-finite values
 are silently skipped.  Returns three `np.ndarray` objects sorted by time.
 Raises `KeyError` if any requested column is missing and `ValueError` if the
 file is empty.
+
+#### `load_netcdf(path, time_col="m_present_time", vacuum_col="m_vacuum", temp_col="m_veh_temp") -> (time, vacuum_inHg, temperature_c)`
+
+Load three variables from a NetCDF file.  Non-finite values are silently
+dropped.  `datetime64` time variables (e.g. CF-decoded times) are converted
+to POSIX seconds.  Returns three `np.ndarray` objects sorted by time.
+Raises `KeyError` if any requested variable is missing and `ValueError` if
+the variables have inconsistent lengths.
 
 #### `fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict`
 
