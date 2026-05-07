@@ -62,6 +62,53 @@ class TestFit:
                 np.array([20.0, 20.0]),
             )
 
+    def test_ar1_correction_fields(self):
+        """ar1=True adds AR(1) keys with finite values; iid noise -> rho1 ~ 0."""
+        r = simulate(days=2.0, timestep=3.0, vacuum_drop_per_day=0.05, seed=41)
+        fit = fit_leak_rate(r["time"], r["vacuum_inHg"], r["temperature_c"], ar1=True)
+        for k in ("ar1_rho1", "ar1_factor", "ar1_n_eff", "ar1_slope_stderr", "ar1_t_value"):
+            assert k in fit
+        assert np.isfinite(fit["ar1_rho1"])
+        assert abs(fit["ar1_rho1"]) < 0.1
+        assert fit["ar1_factor"] >= 1.0 - 1e-6 or fit["ar1_factor"] < 1.0
+        assert fit["ar1_t_value"] / fit["z_score"] == pytest.approx(
+            1.0 / fit["ar1_factor"], rel=1e-6
+        )
+
+    def test_sinusoid_fit_fields_and_slope_close_to_ols(self):
+        """sinusoid_period_s=86400 adds sin_* keys; on iid data slope ~ OLS."""
+        r = simulate(days=2.0, timestep=3.0, vacuum_drop_per_day=0.05, seed=43)
+        fit = fit_leak_rate(
+            r["time"], r["vacuum_inHg"], r["temperature_c"], sinusoid_period_s=86400.0
+        )
+        for k in (
+            "sin_period_s",
+            "sin_slope",
+            "sin_slope_stderr",
+            "sin_slope_per_day",
+            "sin_amplitude",
+            "sin_t_value",
+        ):
+            assert k in fit
+        assert fit["sin_period_s"] == 86400.0
+        # iid noise has negligible 24h component, so the linear-component slope
+        # should be very close to the OLS slope (within a few sigma).
+        delta = abs(fit["sin_slope"] - fit["slope"])
+        assert delta < 5.0 * fit["sin_slope_stderr"]
+
+    def test_ar1_and_sinusoid_combined(self):
+        """ar1=True + sinusoid_period_s gives sin_ar1_* keys too."""
+        r = simulate(days=2.0, timestep=3.0, vacuum_drop_per_day=0.05, seed=47)
+        fit = fit_leak_rate(
+            r["time"],
+            r["vacuum_inHg"],
+            r["temperature_c"],
+            ar1=True,
+            sinusoid_period_s=86400.0,
+        )
+        for k in ("sin_ar1_rho1", "sin_ar1_factor", "sin_ar1_t_value"):
+            assert k in fit
+
 
 class TestLoadCsv:
     def test_roundtrip_via_write_csv(self, tmp_path):

@@ -349,6 +349,9 @@ slocum-tpw analyze-leak [options] FILE
 | `--vacuum-col NAME` | Vacuum column/variable name in inHg (default: `m_vacuum`) |
 | `--temp-col NAME` | Temperature column/variable name in degC (default: `m_veh_temp`) |
 | `--plot PATH` | Save a fit diagnostic plot to `PATH` (default: no plot) |
+| `--ar1` / `--no-ar1` | Report an AR(1)-corrected slope stderr from the lag-1 residual autocorrelation (default: enabled) |
+| `--sinusoid` | Also fit `rho(t) = a + b*t + c*cos(omega*t) + d*sin(omega*t)` and report the linear-trend slope from that joint model |
+| `--sinusoid-period HOURS` | Period for `--sinusoid` (default: 24.0) |
 
 NetCDF time variables stored as `datetime64` (e.g. CF `units = "seconds since
 1970-01-01"`) are converted to POSIX seconds automatically.
@@ -363,6 +366,15 @@ NetCDF time variables stored as `datetime64` (e.g. CF `units = "seconds since
    regression standard error on the slope is its 1-sigma uncertainty.
 3. The reported T-value `slope / sigma` is a quick significance indicator:
    `|T| > ~3` suggests a real trend.
+4. By default, an AR(1) correction inflates the slope stderr by
+   `sqrt((1 + rho_1) / (1 - rho_1))`, where `rho_1` is the lag-1
+   autocorrelation of the residuals.  This is a more honest stderr when
+   residuals carry serial structure (e.g. an unmodeled diurnal thermal cycle).
+   Use `--no-ar1` to suppress it.
+5. With `--sinusoid`, an additional joint OLS fit
+   `rho(t) = a + b*t + c*cos(omega*t) + d*sin(omega*t)` is reported.  Its
+   linear-component slope `b` is the leak estimate after absorbing the
+   sinusoidal thermal residual; the sinusoid period defaults to 24 hours.
 
 Non-numeric rows, non-finite values, and vdW inversion failures are dropped
 from the fit (with a warning).  Input is sorted by time defensively.
@@ -373,19 +385,27 @@ from the fit (with a warning).  Input is sorted by time defensively.
 file                : sim_leak.csv
 rows used           : 115201
 time span           : 345600.0 s (4.0000 days)
-rho range           : 27.6569 .. 28.1344 mol/m^3
-residual sigma(rho) : 9.7539e-03 mol/m^3
+rho range           : 801.2928 .. 815.2432 mg/L
+residual sigma(rho) : 2.8163e-01 mg/L
 
-Linear fit: rho(t) = intercept + slope * t
-  slope              = +1.2069e-06 +/- 2.8805e-10 mol/(m^3 * s)  (T-value = +4189.94)
-  slope 95% CI       = +/- 5.6457e-10 mol/(m^3 * s)
+Linear fit (AR(1)-corrected stderr): rho(t) = intercept + slope * t
+  AR(1) details      : rho_1 = -0.0005, n_eff = 115322, factor = 0.999
+  slope              = +3.4971e-05 +/- 8.3132e-09 mg/L/s  (T-value = +4206.97)
+  slope 95% CI       = +/- 1.6294e-08 mg/L/s
 
-  slope (per day)    = +1.0428e-01 +/- 2.4887e-05 mol/(m^3 * day)
+  slope (per day)    = +3.0215e+00 +/- 7.1821e-04 mg/L/day
+  uncorrected (OLS)  = +/- 7.1858e-04 mg/L/day (T-value = +4204.76)
 
-  intercept          = 27.692575 mol/m^3
-  intercept 1-sigma  = 5.7475e-05 mol/m^3
+  intercept          = 802.104965 mg/L
+  intercept 1-sigma  = 1.6595e-03 mg/L
   (|T-value| > ~3 suggests a real trend)
 ```
+
+(For an iid simulator like `simulate-leak`, the AR(1) correction is a no-op
+and the AR(1) and OLS T-values are nearly identical.  On real glider data
+with un-modeled diurnal residual structure, `rho_1` is typically much closer
+to 1, the inflation factor is correspondingly larger, and the AR(1) T-value
+can be 10–100× smaller than the OLS one.)
 
 **Examples:**
 
@@ -670,7 +690,7 @@ to POSIX seconds.  Returns three `np.ndarray` objects sorted by time.
 Raises `KeyError` if any requested variable is missing and `ValueError` if
 the variables have inconsistent lengths.
 
-#### `fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict`
+#### `fit_leak_rate(time_s, vacuum_inHg, temperature_c, *, ar1=False, sinusoid_period_s=None) -> dict`
 
 Invert van der Waals per sample to get molar density `rho(t) = n/V`, then
 least-squares fit `rho(t) = intercept + slope * t` using
@@ -690,6 +710,31 @@ least-squares fit `rho(t) = intercept + slope * t` using
 | `time`, `rho` | `np.ndarray` | Valid-sample times and inferred molar densities |
 
 Raises `ValueError` if fewer than 3 usable rows survive filtering.
+
+When `ar1=True`, the dict also contains:
+
+| Key | Description |
+|---|---|
+| `ar1_rho1` | Lag-1 autocorrelation of the OLS residuals |
+| `ar1_factor` | Stderr inflation `sqrt((1+rho1)/(1-rho1))` |
+| `ar1_n_eff` | Effective sample size `n * (1-rho1)/(1+rho1)` |
+| `ar1_slope_stderr`, `ar1_slope_stderr_per_day` | Inflated stderr (same units as the OLS counterparts) |
+| `ar1_t_value` | `slope / ar1_slope_stderr` |
+
+When `sinusoid_period_s` is set, the dict also contains a joint
+`a + b*t + c*cos(omega*t) + d*sin(omega*t)` fit:
+
+| Key | Description |
+|---|---|
+| `sin_period_s` | Period (seconds) used for the fit |
+| `sin_slope`, `sin_slope_stderr` | Linear-component slope and stderr, mol/(m^3 * s) |
+| `sin_slope_per_day`, `sin_slope_stderr_per_day` | Same in mol/(m^3 * day) |
+| `sin_intercept`, `sin_intercept_stderr` | Joint-fit intercept at `t = time[0]` |
+| `sin_amplitude`, `sin_phase` | `hypot(c, d)` and `atan2(d, c)` (radians, origin at `time[0]`) |
+| `sin_t_value` | `sin_slope / sin_slope_stderr` |
+
+Combining both adds `sin_ar1_*` keys (AR(1) correction on the joint-fit
+residuals).
 
 **Noise floor:**
 

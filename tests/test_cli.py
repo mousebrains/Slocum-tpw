@@ -188,6 +188,41 @@ class TestCLI:
         assert plot.exists()
         assert plot.stat().st_size > 0
 
+    def test_analyze_leak_no_ar1_and_sinusoid(self, tmp_path, capsys):
+        """--no-ar1 suppresses AR(1) lines; --sinusoid adds the sinusoid block."""
+        sim = tmp_path / "sim.csv"
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "simulate-leak",
+                    "--days",
+                    "0.5",
+                    "--timestep",
+                    "10",
+                    "--vacuum-drop-per-day",
+                    "0.075",
+                    "--seed",
+                    "5",
+                    "-o",
+                    str(sim),
+                ]
+            )
+        capsys.readouterr()  # discard simulator output
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["analyze-leak", "--no-ar1", str(sim)])
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "AR(1)" not in out
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["analyze-leak", "--sinusoid", str(sim)])
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "AR(1)" in out  # default --ar1 stays on
+        assert "Linear + 24-hour sinusoid fit" in out
+        assert "sinusoid amplitude" in out
+
     def test_analyze_leak_bad_columns(self, tmp_path):
         """analyze-leak should exit non-zero when columns are missing."""
         bad = tmp_path / "bad.csv"
