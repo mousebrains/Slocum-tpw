@@ -23,6 +23,9 @@ from scipy import stats
 
 from slocum_tpw.simulate_leak import INHG_TO_PA, P_ATM_PA, vdw_density_vec
 
+# Molar mass of dry air, g/mol; multiplying mol/m^3 by this yields g/m^3 == mg/L.
+M_AIR = 28.9647
+
 _NETCDF_SUFFIXES = {".nc", ".nc4", ".netcdf", ".cdf"}
 
 
@@ -128,7 +131,60 @@ def _load(
     return load_csv(path, time_col=time_col, vacuum_col=vacuum_col, temp_col=temp_col)
 
 
-def fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict:
+def _ar1_correction(resid: np.ndarray) -> dict:
+    """Lag-1 autocorrelation of residuals and the implied stderr inflation.
+
+    Assumes near-uniform sample spacing.  Returns a dict with ``rho1``,
+    ``factor`` (multiplier for OLS stderr), and ``n_eff`` (effective sample
+    size).  When |rho1| >= 1 (degenerate), factor is ``inf`` and n_eff is 0.
+    """
+    if resid.size < 2:
+        return {"rho1": float("nan"), "factor": float("nan"), "n_eff": 0.0}
+    a = float(np.corrcoef(resid[:-1], resid[1:])[0, 1])
+    if not np.isfinite(a) or abs(a) >= 1.0:
+        return {"rho1": a, "factor": float("inf"), "n_eff": 0.0}
+    return {
+        "rho1": a,
+        "factor": float(np.sqrt((1 + a) / (1 - a))),
+        "n_eff": float(resid.size * (1 - a) / (1 + a)),
+    }
+
+
+def _fit_linear_sinusoid(t_s: np.ndarray, y: np.ndarray, period_s: float) -> dict:
+    """Joint OLS fit of ``y = a + b*t + c*cos(omega*t) + d*sin(omega*t)``.
+
+    The origin is shifted to ``t_s[0]`` internally for numerical conditioning,
+    so ``intercept`` is the value at ``t = t_s[0]`` and ``phase`` is referenced
+    to that origin.  Slope, amplitude, and residuals are unchanged by the shift.
+    """
+    t_local = np.asarray(t_s, dtype=float) - float(t_s[0])
+    n = t_local.size
+    omega = 2 * np.pi / period_s
+    X = np.column_stack([np.ones(n), t_local, np.cos(omega * t_local), np.sin(omega * t_local)])
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    resid = y - X @ beta
+    s2 = float(resid @ resid / (n - X.shape[1]))
+    cov = s2 * np.linalg.inv(X.T @ X)
+    se = np.sqrt(np.diag(cov))
+    return {
+        "intercept": float(beta[0]),
+        "slope": float(beta[1]),
+        "intercept_stderr": float(se[0]),
+        "slope_stderr": float(se[1]),
+        "amplitude": float(np.hypot(beta[2], beta[3])),
+        "phase": float(np.arctan2(beta[3], beta[2])),
+        "residuals": resid,
+    }
+
+
+def fit_leak_rate(
+    time_s,
+    vacuum_inHg,
+    temperature_c,
+    *,
+    ar1: bool = False,
+    sinusoid_period_s: float | None = None,
+) -> dict:
     """Fit d(n/V)/dt from observations.
 
     Inverts van der Waals per sample to get the inferred molar density, then
@@ -140,6 +196,15 @@ def fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict:
       enforced here — pass sorted values, e.g. from :func:`load_csv`)
     - ``vacuum_inHg``: measured vacuum in inHg (so absolute P = P_atm - vacuum)
     - ``temperature_c``: measured air temperature in degC
+
+    Optional keyword-only diagnostics:
+
+    - ``ar1``: also report an AR(1)-corrected slope stderr based on the lag-1
+      autocorrelation of the residuals.  Adds ``ar1_*`` keys.
+    - ``sinusoid_period_s``: when set, also fit ``rho(t) = a + b*t +
+      c*cos(omega*t) + d*sin(omega*t)`` with this period (seconds) and report
+      its linear-trend slope.  Adds ``sin_*`` keys.  Combining with ``ar1``
+      adds ``sin_ar1_*`` keys for the AR(1) correction on the joint residual.
 
     Returns a dict containing:
 
@@ -184,10 +249,11 @@ def fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict:
 
     reg = stats.linregress(t_g, rho_g)
     rho_fit = reg.intercept + reg.slope * t_g
-    sigma_rho = float((rho_g - rho_fit).std(ddof=2))
+    residuals = rho_g - rho_fit
+    sigma_rho = float(residuals.std(ddof=2))
     z = reg.slope / reg.stderr if reg.stderr > 0 else float("nan")
 
-    return {
+    result: dict = {
         "slope": float(reg.slope),
         "slope_stderr": float(reg.stderr),
         "slope_95ci": float(1.96 * reg.stderr),
@@ -202,6 +268,47 @@ def fit_leak_rate(time_s, vacuum_inHg, temperature_c) -> dict:
         "time": t_g,
         "rho": rho_g,
     }
+
+    if ar1:
+        c = _ar1_correction(residuals)
+        ar1_se = result["slope_stderr"] * c["factor"]
+        result["ar1_rho1"] = c["rho1"]
+        result["ar1_factor"] = c["factor"]
+        result["ar1_n_eff"] = c["n_eff"]
+        result["ar1_slope_stderr"] = ar1_se
+        result["ar1_slope_stderr_per_day"] = ar1_se * 86400.0
+        result["ar1_t_value"] = (
+            float(reg.slope / ar1_se) if np.isfinite(ar1_se) and ar1_se > 0 else float("nan")
+        )
+
+    if sinusoid_period_s is not None:
+        sf = _fit_linear_sinusoid(t_g, rho_g, sinusoid_period_s)
+        sin_t = sf["slope"] / sf["slope_stderr"] if sf["slope_stderr"] > 0 else float("nan")
+        result["sin_period_s"] = float(sinusoid_period_s)
+        result["sin_slope"] = sf["slope"]
+        result["sin_slope_stderr"] = sf["slope_stderr"]
+        result["sin_slope_per_day"] = sf["slope"] * 86400.0
+        result["sin_slope_stderr_per_day"] = sf["slope_stderr"] * 86400.0
+        result["sin_intercept"] = sf["intercept"]
+        result["sin_intercept_stderr"] = sf["intercept_stderr"]
+        result["sin_amplitude"] = sf["amplitude"]
+        result["sin_phase"] = sf["phase"]
+        result["sin_t_value"] = float(sin_t)
+        if ar1:
+            cs = _ar1_correction(sf["residuals"])
+            sin_ar1_se = sf["slope_stderr"] * cs["factor"]
+            result["sin_ar1_rho1"] = cs["rho1"]
+            result["sin_ar1_factor"] = cs["factor"]
+            result["sin_ar1_n_eff"] = cs["n_eff"]
+            result["sin_ar1_slope_stderr"] = sin_ar1_se
+            result["sin_ar1_slope_stderr_per_day"] = sin_ar1_se * 86400.0
+            result["sin_ar1_t_value"] = (
+                float(sf["slope"] / sin_ar1_se)
+                if np.isfinite(sin_ar1_se) and sin_ar1_se > 0
+                else float("nan")
+            )
+
+    return result
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -239,6 +346,30 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Save a fit diagnostic plot to PATH (default: no plot)",
     )
+    parser.add_argument(
+        "--ar1",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Report an AR(1)-corrected slope stderr from the lag-1 residual "
+            "autocorrelation (default: enabled; pass --no-ar1 to disable)"
+        ),
+    )
+    parser.add_argument(
+        "--sinusoid",
+        action="store_true",
+        help=(
+            "Also fit rho(t) = a + b*t + c*cos(omega*t) + d*sin(omega*t) and "
+            "report the linear-trend slope from that joint model"
+        ),
+    )
+    parser.add_argument(
+        "--sinusoid-period",
+        type=float,
+        default=24.0,
+        metavar="HOURS",
+        help="Period (hours) for --sinusoid (default: 24.0)",
+    )
 
 
 def run(args: argparse.Namespace) -> int:
@@ -258,8 +389,15 @@ def run(args: argparse.Namespace) -> int:
         logging.error("not enough usable rows in %s (got %d)", args.input_file, t.size)
         return 1
 
+    sinusoid_period_s = args.sinusoid_period * 3600.0 if args.sinusoid else None
     try:
-        result = fit_leak_rate(t, vacuum, temp)
+        result = fit_leak_rate(
+            t,
+            vacuum,
+            temp,
+            ar1=args.ar1,
+            sinusoid_period_s=sinusoid_period_s,
+        )
     except ValueError as e:
         logging.error("fit failed: %s", e)
         return 1
@@ -270,63 +408,228 @@ def run(args: argparse.Namespace) -> int:
         f"time span           : {result['time_span_s']:.1f} s "
         f"({result['time_span_s'] / 86400.0:.4f} days)"
     )
-    print(f"rho range           : {result['rho'].min():.4f} .. {result['rho'].max():.4f} mol/m^3")
-    print(f"residual sigma(rho) : {result['sigma_rho']:.4e} mol/m^3")
+    rho_min = result["rho"].min() * M_AIR
+    rho_max = result["rho"].max() * M_AIR
+    sigma_rho = result["sigma_rho"] * M_AIR
+    slope_s = result["slope"] * M_AIR
+    slope_se_s = result["slope_stderr"] * M_AIR
+    slope_95ci = result["slope_95ci"] * M_AIR
+    slope_day = result["slope_per_day"] * M_AIR
+    slope_se_day = result["slope_stderr_per_day"] * M_AIR
+    intercept = result["intercept"] * M_AIR
+    intercept_se = result["intercept_stderr"] * M_AIR
+    print(f"rho range           : {rho_min:.4f} .. {rho_max:.4f} mg/L")
+    print(f"residual sigma(rho) : {sigma_rho:.4e} mg/L")
     print()
-    print("Linear fit: rho(t) = intercept + slope * t")
-    print(
-        f"  slope              = {result['slope']:+.4e} +/- {result['slope_stderr']:.4e} "
-        f"mol/(m^3 * s)  (T-value = {result['z_score']:+.2f})"
-    )
-    print(f"  slope 95% CI       = +/- {result['slope_95ci']:.4e} mol/(m^3 * s)")
+    if args.ar1:
+        ar1_se_s = result["ar1_slope_stderr"] * M_AIR
+        ar1_se_day = result["ar1_slope_stderr_per_day"] * M_AIR
+        ar1_95ci = 1.96 * ar1_se_s
+        print("Linear fit (AR(1)-corrected stderr): rho(t) = intercept + slope * t")
+        print(
+            f"  AR(1) details      : rho_1 = {result['ar1_rho1']:+.4f}, "
+            f"n_eff = {result['ar1_n_eff']:.0f}, factor = {result['ar1_factor']:.3f}"
+        )
+        print(
+            f"  slope              = {slope_s:+.4e} +/- {ar1_se_s:.4e} "
+            f"mg/L/s  (T-value = {result['ar1_t_value']:+.2f})"
+        )
+        print(f"  slope 95% CI       = +/- {ar1_95ci:.4e} mg/L/s")
+        print()
+        print(f"  slope (per day)    = {slope_day:+.4e} +/- {ar1_se_day:.4e} mg/L/day")
+        print(
+            f"  uncorrected (OLS)  = +/- {slope_se_day:.4e} mg/L/day "
+            f"(T-value = {result['z_score']:+.2f})"
+        )
+    else:
+        print("Linear fit: rho(t) = intercept + slope * t")
+        print(
+            f"  slope              = {slope_s:+.4e} +/- {slope_se_s:.4e} "
+            f"mg/L/s  (T-value = {result['z_score']:+.2f})"
+        )
+        print(f"  slope 95% CI       = +/- {slope_95ci:.4e} mg/L/s")
+        print()
+        print(f"  slope (per day)    = {slope_day:+.4e} +/- {slope_se_day:.4e} mg/L/day")
     print()
-    print(
-        f"  slope (per day)    = {result['slope_per_day']:+.4e} +/- "
-        f"{result['slope_stderr_per_day']:.4e} mol/(m^3 * day)"
-    )
-    print()
-    print(f"  intercept          = {result['intercept']:.6f} mol/m^3")
-    print(f"  intercept 1-sigma  = {result['intercept_stderr']:.4e} mol/m^3")
+    print(f"  intercept          = {intercept:.6f} mg/L")
+    print(f"  intercept 1-sigma  = {intercept_se:.4e} mg/L")
     print("  (|T-value| > ~3 suggests a real trend)")
+
+    if args.sinusoid:
+        sin_slope_day = result["sin_slope_per_day"] * M_AIR
+        sin_se_day = result["sin_slope_stderr_per_day"] * M_AIR
+        sin_amp = result["sin_amplitude"] * M_AIR
+        print()
+        if args.ar1:
+            sin_ar1_se_day = result["sin_ar1_slope_stderr_per_day"] * M_AIR
+            print(f"Linear + {args.sinusoid_period:g}-hour sinusoid fit (AR(1)-corrected stderr):")
+            print(
+                f"  AR(1) details      : rho_1 = {result['sin_ar1_rho1']:+.4f}, "
+                f"n_eff = {result['sin_ar1_n_eff']:.0f}, "
+                f"factor = {result['sin_ar1_factor']:.3f}"
+            )
+            print(
+                f"  slope (per day)    = {sin_slope_day:+.4e} +/- {sin_ar1_se_day:.4e} mg/L/day "
+                f"(T-value = {result['sin_ar1_t_value']:+.2f})"
+            )
+            print(
+                f"  uncorrected (OLS)  = +/- {sin_se_day:.4e} mg/L/day "
+                f"(T-value = {result['sin_t_value']:+.2f})"
+            )
+        else:
+            print(f"Linear + {args.sinusoid_period:g}-hour sinusoid fit:")
+            print(
+                f"  slope (per day)    = {sin_slope_day:+.4e} +/- {sin_se_day:.4e} mg/L/day "
+                f"(T-value = {result['sin_t_value']:+.2f})"
+            )
+        print(f"  sinusoid amplitude = {sin_amp:.4f} mg/L")
 
     if args.plot is not None:
         import matplotlib
 
         matplotlib.use("Agg")
+        from datetime import UTC, datetime
+
+        import matplotlib.dates as mdates
         import matplotlib.pyplot as plt
 
-        t_g = result["time"]
-        rho_g = result["rho"]
-        rho0 = rho_g[0]
-        rho_fit = result["intercept"] + result["slope"] * t_g
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(
-            (t_g - t_g[0]) / 3600.0,
-            rho_g - rho0,
-            ".",
-            ms=0.5,
-            alpha=0.3,
-            label="inferred n/V - rho[0]",
+        from slocum_tpw.simulate_leak import R
+
+        P_abs = P_ATM_PA - vacuum * INHG_TO_PA
+        T_K = temp + 273.15
+        rho_ideal = (P_abs * M_AIR) / (R * T_K)
+        rho_vdw = vdw_density_vec(P_abs, T_K) * M_AIR
+
+        ok = np.isfinite(rho_vdw)
+        t_days = (t - t[0]) / 86400.0
+
+        def _ols(x, y):
+            n = x.size
+            xm = x.mean()
+            ym = y.mean()
+            Sxx = float(np.sum((x - xm) ** 2))
+            slope = float(np.sum((x - xm) * (y - ym)) / Sxx)
+            intercept = float(ym - slope * xm)
+            resid = y - (intercept + slope * x)
+            s2 = float(np.sum(resid**2) / (n - 2))
+            stderr = float(np.sqrt(s2 / Sxx))
+            return intercept, slope, stderr, slope / stderr, resid
+
+        a_i, b_i, se_i, t_i, resid_i = _ols(t_days, rho_ideal)
+        a_w, b_w, se_w, t_w, resid_w = _ols(t_days[ok], rho_vdw[ok])
+
+        sin_period_d = (args.sinusoid_period / 24.0) if args.sinusoid else None
+
+        def _sin_fit(x, y):
+            return _fit_linear_sinusoid(x, y, sin_period_d)
+
+        # When --ar1, swap displayed stderr/T to the AR(1)-corrected ones so
+        # the legend reflects the same "primary" numbers as the printed output.
+        if args.ar1:
+            f_i = _ar1_correction(resid_i)["factor"]
+            f_w = _ar1_correction(resid_w)["factor"]
+            disp_se_i, disp_t_i = se_i * f_i, b_i / (se_i * f_i)
+            disp_se_w, disp_t_w = se_w * f_w, b_w / (se_w * f_w)
+        else:
+            disp_se_i, disp_t_i = se_i, t_i
+            disp_se_w, disp_t_w = se_w, t_w
+        if args.sinusoid:
+            sin_i = _sin_fit(t_days, rho_ideal)
+            sin_w = _sin_fit(t_days[ok], rho_vdw[ok])
+            if args.ar1:
+                sf_i = _ar1_correction(sin_i["residuals"])["factor"]
+                sf_w = _ar1_correction(sin_w["residuals"])["factor"]
+                disp_sin_se_i = sin_i["slope_stderr"] * sf_i
+                disp_sin_se_w = sin_w["slope_stderr"] * sf_w
+            else:
+                disp_sin_se_i = sin_i["slope_stderr"]
+                disp_sin_se_w = sin_w["slope_stderr"]
+            disp_sin_t_i = sin_i["slope"] / disp_sin_se_i
+            disp_sin_t_w = sin_w["slope"] / disp_sin_se_w
+
+        kind = "AR(1)" if args.ar1 else "OLS"
+
+        def _label(name, b, se, t_, sin_b, sin_se, sin_t):
+            head = f"{name} fit: {b:+.3f} +/- {se:.3f} mg/L/day  (T_{kind}={t_:+.1f})"
+            if sin_b is not None:
+                head += f"; +sin: {sin_b:+.3f} +/- {sin_se:.3f}  (T_{kind}={sin_t:+.1f})"
+            return head
+
+        lab_i = _label(
+            "ideal",
+            b_i,
+            disp_se_i,
+            disp_t_i,
+            sin_i["slope"] if args.sinusoid else None,
+            disp_sin_se_i if args.sinusoid else None,
+            disp_sin_t_i if args.sinusoid else None,
         )
-        ax.plot(
-            (t_g - t_g[0]) / 3600.0,
-            rho_fit - rho0,
-            "-",
-            color="C1",
-            lw=1.4,
-            label=(
-                f"fit: slope = {result['slope_per_day']:+.3e} +/- "
-                f"{result['slope_stderr_per_day']:.1e} mol/m^3/day "
-                f"(T-value = {result['z_score']:+.2f})"
-            ),
+        lab_w = _label(
+            "vdW  ",
+            b_w,
+            disp_se_w,
+            disp_t_w,
+            sin_w["slope"] if args.sinusoid else None,
+            disp_sin_se_w if args.sinusoid else None,
+            disp_sin_t_w if args.sinusoid else None,
         )
-        ax.axhline(0, color="k", lw=0.5)
-        ax.set_xlabel("Time from first sample (hours)")
-        ax.set_ylabel("n/V - rho[0]  (mol/m^3)")
-        ax.set_title(f"Leak fit: {args.input_file}")
-        ax.grid(True, alpha=0.4)
-        ax.legend(loc="upper right")
-        fig.tight_layout()
+
+        t_dt = np.array([datetime.fromtimestamp(s, tz=UTC) for s in t])
+        t_num = mdates.date2num(t_dt)
+
+        fig = plt.figure(figsize=(13, 7))
+        gs = fig.add_gridspec(
+            2,
+            2,
+            width_ratios=[1.1, 1.4],
+            height_ratios=[1, 1],
+            wspace=0.28,
+            hspace=0.18,
+        )
+        ax_scatter = fig.add_subplot(gs[:, 0])
+        ax_T = fig.add_subplot(gs[0, 1])
+        ax_V = ax_T.twinx()
+        ax_rho = fig.add_subplot(gs[1, 1], sharex=ax_T)
+
+        sc = ax_scatter.scatter(vacuum, temp, c=t_num, cmap="viridis", s=6, alpha=0.7)
+        ax_scatter.set_xlabel("m_vacuum (inHg)")
+        ax_scatter.set_ylabel("m_veh_temp (deg C)")
+        ax_scatter.set_title("m_veh_temp vs m_vacuum")
+        ax_scatter.grid(True, alpha=0.3)
+        cb = fig.colorbar(sc, ax=ax_scatter, location="bottom", pad=0.10, fraction=0.05)
+        cb.ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        cb.ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+        cb.set_label("time (UTC)")
+        for lbl in cb.ax.get_xticklabels():
+            lbl.set_rotation(20)
+            lbl.set_ha("right")
+
+        ax_T.plot(t_dt, temp, ".", ms=2, alpha=0.6, color="C3")
+        ax_T.set_ylabel("m_veh_temp (deg C)", color="C3")
+        ax_T.tick_params(axis="y", colors="C3")
+        ax_T.invert_yaxis()
+        ax_T.grid(True, alpha=0.3)
+        ax_T.set_title("time series")
+        plt.setp(ax_T.get_xticklabels(), visible=False)
+        ax_V.plot(t_dt, vacuum, ".", ms=2, alpha=0.6, color="C0")
+        ax_V.set_ylabel("m_vacuum (inHg)", color="C0")
+        ax_V.tick_params(axis="y", colors="C0")
+
+        ax_rho.plot(t_dt, rho_ideal, ".", ms=2, alpha=0.5, color="C2")
+        ax_rho.plot(t_dt[ok], rho_vdw[ok], ".", ms=2, alpha=0.5, color="C1")
+        ax_rho.plot(t_dt, a_i + b_i * t_days, "-", lw=1.8, color="magenta", label=lab_i)
+        ax_rho.plot(t_dt[ok], a_w + b_w * t_days[ok], "-", lw=1.8, color="cyan", label=lab_w)
+        ax_rho.set_ylabel("density (mg/L)")
+        ax_rho.set_xlabel("time (UTC)")
+        ax_rho.grid(True, alpha=0.3)
+        ax_rho.legend(loc="best", framealpha=0.9, fontsize=9)
+        ax_rho.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax_rho.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+        for lbl in ax_rho.get_xticklabels():
+            lbl.set_rotation(20)
+            lbl.set_ha("right")
+
+        fig.suptitle(f"Leak fit: {args.input_file}", y=0.995)
         fig.savefig(args.plot, dpi=140)
         print(f"  plot written to    : {args.plot}")
 
